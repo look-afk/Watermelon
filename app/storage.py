@@ -18,6 +18,7 @@ class Storage:
                 )
             """)
             con.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_user ON messages(chat_id, user_id, id)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, id)")
 
     def _connect(self):
         return sqlite3.connect(self.path)
@@ -34,5 +35,13 @@ class Storage:
             rows = con.execute(
                 "SELECT message_text FROM messages WHERE chat_id=? AND user_id=? ORDER BY id DESC LIMIT ?",
                 (chat_id, user_id, limit)
+            ).fetchall()
+        return [row[0] for row in reversed(rows)]
+
+    def get_messages_all(self, user_id: int, limit: int) -> list[str]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT message_text FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (user_id, limit)
             ).fetchall()
         return [row[0] for row in reversed(rows)]
