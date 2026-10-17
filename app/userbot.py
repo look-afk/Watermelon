@@ -1,7 +1,6 @@
 import asyncio
 import html
 import os
-import re
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from .config import settings
@@ -73,11 +72,11 @@ async def main():
                 event.chat_id,
                 limit=settings.max_messages_per_analysis,
                 from_user=target_id,
-                reverse=True,
             ):
                 text = (message.message or "").strip()
                 if text and not text.startswith(".analyze"):
                     rows.append(text)
+            rows.reverse()
             if len(rows) < 2:
                 await client.send_message(
                     event.chat_id,
