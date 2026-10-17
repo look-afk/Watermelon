@@ -3,6 +3,7 @@ import html
 import os
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.types import User
 from .config import settings
 from .storage import Storage
 from .analyzer import analyze_messages
@@ -54,17 +55,11 @@ async def main():
             chat = await event.get_chat()
             if target_text:
                 target_id = int(target_text)
-            elif getattr(chat, "bot", False) or getattr(chat, "broadcast", False):
+            elif not isinstance(chat, User) or getattr(chat, "bot", False):
                 await event.respond("Укажи ID пользователя: .analyze USER_ID")
                 return
-            elif getattr(chat, "megagroup", False) or getattr(chat, "gigagroup", False):
-                await event.respond("В группе укажи ID пользователя: .analyze USER_ID")
-                return
             else:
-                target_id = getattr(chat, "id", None)
-                if target_id is None:
-                    await event.respond("Не удалось определить пользователя. Используй .analyze USER_ID")
-                    return
+                target_id = chat.id
 
             await event.delete()
             rows = []
