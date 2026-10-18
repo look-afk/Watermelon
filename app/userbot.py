@@ -11,6 +11,12 @@ from .analyzer import analyze_messages
 from .config import settings
 from .storage import Storage
 
+_client = None
+
+
+def get_client():
+    return _client
+
 
 def required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -24,6 +30,7 @@ def split_text(text: str, limit: int = 3500) -> list[str]:
 
 
 async def main():
+    global _client
     api_id = int(required_env("TG_API_ID"))
     api_hash = required_env("TG_API_HASH")
     session = required_env("TG_SESSION")
@@ -34,6 +41,7 @@ async def main():
 
     storage = Storage(settings.database_path)
     client = TelegramClient(StringSession(session), api_id, api_hash)
+    _client = client
 
     @client.on(events.NewMessage(incoming=True))
     async def collect_message(event):
