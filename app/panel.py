@@ -154,8 +154,13 @@ async def members(request):
         raise web.HTTPForbidden(text=json.dumps({"error": "Не удалось получить участников. Возможно, Telegram ограничивает доступ к списку участников этого чата."}), content_type="application/json") from exc
 
 
+async def health(request):
+    return web.json_response({"status": "ok", "service": "watermelon"})
+
+
 def create_app():
     app = web.Application()
+    app.router.add_get("/health", health)
     app.router.add_get("/", index)
     app.router.add_get("/panel", index)
     app.router.add_get("/api/chats", chats)
