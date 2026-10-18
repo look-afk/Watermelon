@@ -137,7 +137,7 @@ async def members(request):
             last = getattr(participant, "last_name", None) or ""
             title = (first + " " + last).strip() or getattr(participant, "title", None) or "Без имени"
             username = getattr(participant, "username", None)
-            stats = storage.get_user_stats(entity.id, participant.id)
+            stats = storage.get_user_stats(chat_id, participant.id)
             items.append({
                 "id": participant.id,
                 "kind": "member",
