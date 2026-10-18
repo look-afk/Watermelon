@@ -16,9 +16,13 @@ class Settings:
     llm_model: str = os.getenv("LLM_MODEL", "gemini-2.5-flash")
     database_path: str = os.getenv("DATABASE_PATH", "messages.db")
     max_messages_per_analysis: int = int(os.getenv("MAX_MESSAGES_PER_ANALYSIS", "100"))
-    max_messages_per_sync: int = int(os.getenv("MAX_MESSAGES_PER_SYNC", "5000"))
+    # Automatic background history sync (no commands needed).
+    auto_sync_dialogs: int = int(os.getenv("AUTO_SYNC_DIALOGS", "150"))
+    auto_sync_messages_per_chat: int = int(
+        os.getenv("AUTO_SYNC_MESSAGES_PER_CHAT", os.getenv("MAX_MESSAGES_PER_SYNC", "2000"))
+    )
+    auto_sync_interval_min: int = int(os.getenv("AUTO_SYNC_INTERVAL_MIN", "30"))
     # Extra Telegram user IDs (comma separated) allowed to open the panel.
-    # The account behind TG_SESSION is always allowed.
     panel_allowed_user_ids: str = os.getenv("PANEL_ALLOWED_USER_IDS", "")
 
 
