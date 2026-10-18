@@ -4,6 +4,7 @@ import json
 import os
 
 from telethon import TelegramClient, events
+from telethon.errors import AuthKeyDuplicatedError
 from telethon.sessions import StringSession
 from telethon.tl.types import User
 
@@ -20,7 +21,7 @@ def get_client():
 
 def required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
-    if not value:
+    if not value or value == "replace_me":
         raise RuntimeError(f"Не задана переменная окружения {name}")
     return value
 
@@ -41,7 +42,6 @@ async def main():
 
     storage = Storage(settings.database_path)
     client = TelegramClient(StringSession(session), api_id, api_hash)
-    _client = client
 
     @client.on(events.NewMessage(incoming=True))
     async def collect_message(event):
@@ -80,14 +80,13 @@ async def main():
                 f"Синхронизирую доступную историю этого чата (до {settings.max_messages_per_sync} сообщений)…",
             )
 
-            # Fetch the most recent N messages, then store them oldest-first.
             history = [
                 message async for message in client.iter_messages(
                     chat_id,
                     limit=settings.max_messages_per_sync,
                 )
             ]
-            saved = 0
+            rows = []
             skipped = 0
             for message in reversed(history):
                 message_text = (message.message or "").strip()
@@ -95,27 +94,25 @@ async def main():
                 if not message_text or not sender_id or message_text.startswith(".sync"):
                     skipped += 1
                     continue
+                sender = message.sender
+                if sender is not None and getattr(sender, "bot", False):
+                    skipped += 1
+                    continue
+                rows.append((
+                    chat_id,
+                    sender_id,
+                    getattr(sender, "username", None) if sender else None,
+                    message_text,
+                    message.id,
+                    message.date.isoformat() if message.date else None,
+                ))
 
-                try:
-                    sender = await message.get_sender()
-                    if sender is not None and getattr(sender, "bot", False):
-                        skipped += 1
-                        continue
-                    storage.save_message(
-                        chat_id=chat_id,
-                        user_id=sender_id,
-                        username=getattr(sender, "username", None) if sender else None,
-                        message_text=message_text,
-                        telegram_message_id=message.id,
-                        created_at=message.date.isoformat() if message.date else None,
-                    )
-                    saved += 1
-                except Exception as exc:
-                    print(f"Не удалось импортировать сообщение {message.id}: {type(exc).__name__}: {exc}")
-
+            saved = await asyncio.to_thread(storage.save_messages_bulk, rows)
+            duplicates = len(rows) - saved
             await status.edit(
                 f"Синхронизация завершена. Обработано сообщений: {len(history)}. "
-                f"Добавлено новых текстовых сообщений: {saved}. Пропущено: {skipped}.\n"
+                f"Добавлено новых текстовых сообщений: {saved}. "
+                f"Уже были в базе: {duplicates}. Пропущено: {skipped}.\n"
                 "Теперь открой бота и отправь /analyze USER_ID. "
                 "Для другого чата отдельно выполни .sync в том чате."
             )
@@ -139,9 +136,9 @@ async def main():
             elif not isinstance(chat, User) or getattr(chat, "bot", False):
                 await event.respond("Укажи ID пользователя: .analyze USER_ID")
                 return
+
             else:
                 target_id = chat.id
-
             await event.delete()
             rows = []
             async for message in client.iter_messages(
@@ -204,14 +201,30 @@ async def main():
             "Синхронизируй только чаты, в которых у тебя есть право обрабатывать сообщения."
         )
 
-    await client.start()
+    # Avoid an interactive login prompt on Render when StringSession is invalid.
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "TG_SESSION недействителен или отозван. Создай новую строку: python -m app.create_session"
+            )
+    except AuthKeyDuplicatedError as exc:
+        raise RuntimeError(
+            "Одна и та же TG_SESSION используется из двух мест одновременно (например, локально и на Render). "
+            "Останови второй процесс и создай новую сессию: python -m app.create_session"
+        ) from exc
+
+    _client = client
     me = await client.get_me()
     print(f"Watermelon Userbot запущен для аккаунта ID {me.id}.")
     print(
         f"Сбор новых входящих текстовых сообщений включён. "
         f"Для импорта истории конкретного чата отправь .sync (лимит: {settings.max_messages_per_sync})."
     )
-    await client.run_until_disconnected()
+    try:
+        await client.run_until_disconnected()
+    finally:
+        _client = None
 
 
 if __name__ == "__main__":
