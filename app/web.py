@@ -1,9 +1,12 @@
 """Run the Telegram bot, personal-account client, and authenticated Web App."""
 import asyncio
 import os
+import signal
 
 from aiohttp import web
 
+from . import backup
+from .config import settings
 from .main import main as bot_main
 from .panel import create_app
 from .userbot import main as userbot_main
@@ -23,7 +26,29 @@ async def run_http_server():
 
 
 async def main():
-    await asyncio.gather(bot_main(), userbot_main(), run_http_server())
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # e.g. Windows
+            pass
+
+    tasks = [asyncio.create_task(c) for c in (bot_main(), userbot_main(), run_http_server())]
+    stopper = asyncio.create_task(stop.wait())
+    try:
+        done, _ = await asyncio.wait([*tasks, stopper], return_when=asyncio.FIRST_COMPLETED)
+        if stopper in done:
+            # Render sent SIGTERM (redeploy / free-tier spin-down): save the database to Telegram first.
+            print("Получен сигнал остановки — сохраняю базу в «Избранное»…")
+            await backup.final_backup(settings.database_path)
+        else:
+            for task in done:
+                task.result()  # re-raise the first failure, like gather() did
+    finally:
+        for task in (*tasks, stopper):
+            task.cancel()
+        await asyncio.gather(*tasks, stopper, return_exceptions=True)
 
 
 if __name__ == "__main__":
