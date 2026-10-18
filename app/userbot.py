@@ -1,12 +1,16 @@
 import asyncio
 import html
+import json
 import os
+
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import User
+
+from .analyzer import analyze_messages
 from .config import settings
 from .storage import Storage
-from .analyzer import analyze_messages
+
 
 def required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -14,8 +18,10 @@ def required_env(name: str) -> str:
         raise RuntimeError(f"Не задана переменная окружения {name}")
     return value
 
+
 def split_text(text: str, limit: int = 3500) -> list[str]:
     return [text[i:i + limit] for i in range(0, len(text), limit)] or ["{}"]
+
 
 async def main():
     api_id = int(required_env("TG_API_ID"))
@@ -44,9 +50,76 @@ async def main():
                 user_id=sender_id,
                 username=getattr(sender, "username", None),
                 message_text=message_text,
+                telegram_message_id=event.message.id,
+                created_at=event.message.date.isoformat() if event.message.date else None,
             )
         except Exception as exc:
             print(f"Не удалось сохранить сообщение: {type(exc).__name__}: {exc}")
+
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.sync$"))
+    async def sync_current_chat(event):
+        """Import recent accessible text history only for the chat where .sync was sent."""
+        status = None
+        try:
+            chat_id = event.chat_id
+            if chat_id is None:
+                await event.respond("Не удалось определить текущий чат.")
+                return
+
+            await event.delete()
+            status = await client.send_message(
+                chat_id,
+                f"Синхронизирую доступную историю этого чата (до {settings.max_messages_per_sync} сообщений)…",
+            )
+
+            # Fetch the most recent N messages, then store them oldest-first.
+            history = [
+                message async for message in client.iter_messages(
+                    chat_id,
+                    limit=settings.max_messages_per_sync,
+                )
+            ]
+            saved = 0
+            skipped = 0
+            for message in reversed(history):
+                message_text = (message.message or "").strip()
+                sender_id = message.sender_id
+                if not message_text or not sender_id or message_text.startswith(".sync"):
+                    skipped += 1
+                    continue
+
+                try:
+                    sender = await message.get_sender()
+                    if sender is not None and getattr(sender, "bot", False):
+                        skipped += 1
+                        continue
+                    storage.save_message(
+                        chat_id=chat_id,
+                        user_id=sender_id,
+                        username=getattr(sender, "username", None) if sender else None,
+                        message_text=message_text,
+                        telegram_message_id=message.id,
+                        created_at=message.date.isoformat() if message.date else None,
+                    )
+                    saved += 1
+                except Exception as exc:
+                    print(f"Не удалось импортировать сообщение {message.id}: {type(exc).__name__}: {exc}")
+
+            await status.edit(
+                f"Синхронизация завершена. Обработано сообщений: {len(history)}. "
+                f"Добавлено новых текстовых сообщений: {saved}. Пропущено: {skipped}.\n"
+                "Теперь открой бота и отправь /analyze USER_ID. "
+                "Для другого чата отдельно выполни .sync в том чате."
+            )
+        except Exception as exc:
+            print(f"Ошибка синхронизации истории: {type(exc).__name__}: {exc}")
+            try:
+                if status:
+                    await status.edit("Не удалось синхронизировать историю. Проверь логи Render.")
+                else:
+                    await event.respond("Не удалось синхронизировать историю. Проверь логи Render.")
+            except Exception:
+                pass
 
     @client.on(events.NewMessage(outgoing=True, pattern=r"^\.analyze(?:\s+(\d+))?$"))
     async def analyze_current_chat(event):
@@ -75,12 +148,11 @@ async def main():
             if len(rows) < 2:
                 await client.send_message(
                     event.chat_id,
-                    "Недостаточно текстовых сообщений этого пользователя в доступной истории чата."
+                    "Недостаточно текстовых сообщений этого пользователя в доступной истории чата.",
                 )
                 return
             await client.send_message(event.chat_id, f"Анализирую {len(rows)} сообщений…")
             result = await asyncio.to_thread(analyze_messages, rows)
-            import json
             output = html.escape(json.dumps(result, ensure_ascii=False, indent=2))
             for chunk in split_text(output):
                 await client.send_message(event.chat_id, f"<pre>{chunk}</pre>", parse_mode="html")
@@ -97,12 +169,12 @@ async def main():
             if len(rows) < 2:
                 await client.send_message(
                     event.chat_id,
-                    "Пока недостаточно новых сообщений этого пользователя. Userbot сохраняет входящие сообщения после запуска."
+                    "Недостаточно сохранённых сообщений этого пользователя. "
+                    "Выполни .sync в нужных чатах или дождись новых сообщений.",
                 )
                 return
-            await client.send_message(event.chat_id, f"Анализирую {len(rows)} сообщений из разных чатов…")
+            await client.send_message(event.chat_id, f"Анализирую {len(rows)} сообщений из синхронизированных чатов…")
             result = await asyncio.to_thread(analyze_messages, rows)
-            import json
             output = html.escape(json.dumps(result, ensure_ascii=False, indent=2))
             for chunk in split_text(output):
                 await client.send_message(event.chat_id, f"<pre>{chunk}</pre>", parse_mode="html")
@@ -116,17 +188,23 @@ async def main():
         await client.send_message(
             event.chat_id,
             "Watermelon Userbot\n"
-            ".analyze USER_ID — анализ доступной истории пользователя в текущем чате.\n"
+            ".sync — импортировать доступную историю текущего чата в базу Watermelon.\n"
+            ".analyze USER_ID — анализ истории пользователя в текущем чате.\n"
             ".analyze — в личном чате анализ собеседника.\n"
-            ".analyzeall USER_ID — анализ новых сообщений пользователя из разных чатов, полученных после запуска.\n"
-            ".helpwatermelon — эта справка."
+            ".analyzeall USER_ID — анализ сохранённых сообщений пользователя из синхронизированных чатов.\n"
+            ".helpwatermelon — эта справка.\n\n"
+            "Синхронизируй только чаты, в которых у тебя есть право обрабатывать сообщения."
         )
 
     await client.start()
     me = await client.get_me()
     print(f"Watermelon Userbot запущен для аккаунта ID {me.id}.")
-    print("Сбор входящих текстовых сообщений включён. Остановка — завершить процесс.")
+    print(
+        f"Сбор новых входящих текстовых сообщений включён. "
+        f"Для импорта истории конкретного чата отправь .sync (лимит: {settings.max_messages_per_sync})."
+    )
     await client.run_until_disconnected()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
