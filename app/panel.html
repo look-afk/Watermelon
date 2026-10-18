@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Watermelon</title>
+<style>
+:root{--bg:#fff;--sec:#f1f3f6;--text:#14202b;--hint:#7a8794;--accent:#2f81f7;--accent-t:#fff;--line:rgba(120,130,145,.2);--green:#2ea44f}
+@media(prefers-color-scheme:dark){:root{--bg:#17212b;--sec:#0e1621;--text:#f4f7fa;--hint:#8596a8;--accent:#4aa3ff;--accent-t:#fff;--line:rgba(255,255,255,.09)}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0}
+body{background:var(--bg);color:var(--text);font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;padding:0}
+input{font:inherit;color:inherit}
+
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:12px 16px 10px}
+.top{display:flex;align-items:center;gap:10px;min-height:40px}
+#back{width:36px;height:36px;border-radius:50%;background:var(--sec);font-size:22px;line-height:1;display:none;flex:none}
+.ttl{min-width:0;flex:1}
+h1{margin:0;font-size:20px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{color:var(--hint);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sync{flex:none;display:none;align-items:center;gap:6px;background:var(--sec);border-radius:20px;padding:5px 10px;font-size:12px;color:var(--hint)}
+.sync.on{display:flex}
+.spin{width:10px;height:10px;border:2px solid var(--hint);border-top-color:transparent;border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.search{margin-top:10px}
+.search input{width:100%;border:0;background:var(--sec);border-radius:12px;padding:10px 14px;outline:none}
+.search input::placeholder{color:var(--hint)}
+.seg{display:flex;gap:6px;margin-top:10px;overflow-x:auto;scrollbar-width:none}
+.seg::-webkit-scrollbar{display:none}
+.seg button{flex:none;padding:6px 14px;border-radius:20px;background:var(--sec);color:var(--hint);font-size:13.5px;font-weight:600}
+.seg button.on{background:var(--accent);color:var(--accent-t)}
+
+.stats{display:none;grid-template-columns:repeat(3,1fr);gap:8px;padding:14px 16px 4px}
+.stat{background:var(--sec);border-radius:14px;padding:10px 12px}
+.stat b{display:block;font-size:18px;line-height:1.2}
+.stat span{font-size:11.5px;color:var(--hint)}
+.note{margin:10px 16px 0;padding:10px 12px;border-radius:12px;background:var(--sec);color:var(--hint);font-size:12.5px}
+
+.row{display:flex;align-items:center;gap:12px;padding:10px 16px;cursor:pointer}
+.row:active{background:var(--sec)}
+.av{flex:none;width:50px;height:50px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:17px;overflow:hidden}
+.av img{width:100%;height:100%;object-fit:cover;display:block}
+.av.s{width:38px;height:38px;font-size:14px}
+.av.l{width:64px;height:64px;font-size:22px}
+.main{min-width:0;flex:1}
+.l1,.l2,.l3{display:flex;align-items:center;gap:8px;min-width:0}
+.l1 .nm{flex:1;min-width:0;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.l1 .tm{flex:none;font-size:12px;color:var(--hint)}
+.l2{margin-top:1px}
+.l2 .pv{flex:1;min-width:0;color:var(--hint);font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badge{flex:none;min-width:20px;padding:1px 7px;border-radius:12px;background:var(--accent);color:var(--accent-t);font-size:12px;font-weight:700;text-align:center}
+.badge.mute{background:var(--hint);opacity:.7}
+.l3{margin-top:5px;flex-wrap:wrap}
+.chip{font-size:11px;padding:2px 8px;border-radius:10px;background:var(--sec);color:var(--hint)}
+.chip.db{background:rgba(46,164,79,.15);color:var(--green);font-weight:600}
+.empty-db{opacity:.85}
+
+.mrow .cnt{flex:none;text-align:right}
+.mrow .cnt b{display:block;font-size:15px}
+.mrow .cnt span{font-size:11px;color:var(--hint)}
+.bar{height:4px;border-radius:3px;background:var(--sec);margin-top:6px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.you{font-size:10.5px;color:var(--accent);font-weight:700;margin-left:4px}
+
+.day{padding:14px 16px 4px;text-align:center;font-size:12px;color:var(--hint);font-weight:600}
+.msg{padding:8px 16px}
+.msg .h{display:flex;gap:8px;align-items:baseline}
+.msg .who{font-weight:650;font-size:13.5px}
+.msg .at{font-size:11.5px;color:var(--hint)}
+.msg .tx{margin-top:2px;white-space:pre-wrap;overflow-wrap:anywhere}
+.more{display:block;margin:12px auto 24px;padding:9px 20px;border-radius:20px;background:var(--sec);font-weight:600;font-size:13.5px}
+
+.state{padding:36px 24px;text-align:center;color:var(--hint)}
+.state[hidden]{display:none}
+
+.ov{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:20;display:flex;align-items:flex-end;justify-content:center}
+.sheet{background:var(--bg);width:100%;max-width:560px;max-height:88vh;border-radius:20px 20px 0 0;overflow:auto;padding-bottom:calc(16px + env(safe-area-inset-bottom))}
+.sh-top{display:flex;gap:14px;align-items:center;padding:18px 16px 8px;position:relative}
+.sh-top .x{position:absolute;right:12px;top:12px;width:32px;height:32px;border-radius:50%;background:var(--sec);font-size:16px}
+.sh-top h2{margin:0;font-size:18px;overflow-wrap:anywhere;padding-right:30px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:8px 16px 4px}
+.sh-title{padding:14px 16px 2px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--hint)}
+@media(min-width:700px){body{max-width:640px;margin:0 auto;border-left:1px solid var(--line);border-right:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <button id="back" aria-label="Назад">‹</button>
+    <div class="ttl"><h1 id="title">Сообщения</h1><div class="sub" id="subtitle"></div></div>
+    <div class="sync" id="sync"><span class="spin"></span><span id="synctxt"></span></div>
+  </div>
+  <div class="search"><input id="query" type="search" placeholder="Поиск по чатам…" autocomplete="off"></div>
+  <div class="seg" id="seg"></div>
+</header>
+<div class="stats" id="stats"></div>
+<div class="note" id="note" hidden></div>
+<main id="list"></main>
+<div class="state" id="state">Загружаю…</div>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+const $=s=>document.querySelector(s);
+const list=$('#list'),state=$('#state'),titleEl=$('#title'),subEl=$('#subtitle'),query=$('#query'),back=$('#back'),seg=$('#seg'),stats=$('#stats'),noteEl=$('#note'),syncEl=$('#sync'),syncTxt=$('#synctxt');
+
+/* ---------- Telegram + theme ---------- */
+const tg=window.Telegram&&window.Telegram.WebApp;
+let initData='';
+try{
+  if(tg){
+    initData=tg.initData||'';tg.ready();tg.expand();
+    const tp=tg.themeParams||{},root=document.documentElement.style;
+    const set=(k,v)=>{if(v)root.setProperty(k,v)};
+    set('--bg',tp.bg_color);set('--text',tp.text_color);set('--hint',tp.hint_color);
+    set('--sec',tp.secondary_bg_color);set('--accent',tp.button_color);set('--accent-t',tp.button_text_color);
+  }
+}catch(e){}
+
+/* ---------- helpers ---------- */
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined&&text!==null)e.textContent=text;return e}
+const num=n=>new Intl.NumberFormat('ru-RU').format(n||0);
+function plural(n,a,b,c){n=Math.abs(n)%100;const m=n%10;if(n>10&&n<20)return c;if(m>1&&m<5)return b;if(m===1)return a;return c}
+function initials(s){return (s||'?').trim().split(/\s+/).slice(0,2).map(x=>Array.from(x)[0]||'').join('').toUpperCase()||'?'}
+const COLORS=['#e17076','#e8975a','#a695e7','#6cc260','#46b9c4','#5aa5e0','#ee7aae'];
+const colorOf=id=>COLORS[Math.abs(Number(id)||0)%COLORS.length];
+function fmtShort(iso){
+  if(!iso)return '';const d=new Date(iso),n=new Date();
+  if(d.toDateString()===n.toDateString())return d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+  const diff=(n-d)/864e5;
+  if(diff<6)return d.toLocaleDateString('ru-RU',{weekday:'short'});
+  return d.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',year:'2-digit'});
+}
+function fmtFull(iso){return iso?new Date(iso).toLocaleString('ru-RU',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'—'}
+function fmtDay(iso){return new Date(iso).toLocaleDateString('ru-RU',{day:'numeric',month:'long',year:'numeric'})}
+function fmtTime(iso){return new Date(iso).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}
+function ago(iso){
+  if(!iso)return 'нет данных';const s=(Date.now()-new Date(iso))/1000;
+  if(s<90)return 'только что';if(s<3600)return Math.round(s/60)+' мин назад';
+  if(s<86400)return Math.round(s/3600)+' ч назад';if(s<86400*30)return Math.round(s/86400)+' дн назад';
+  return fmtShort(iso);
+}
+function showState(t){state.textContent=t;state.hidden=!t}
+
+/* ---------- api ---------- */
+async function api(path){
+  const r=await fetch(path,{headers:{'X-Telegram-Init-Data':initData}});
+  let j={};try{j=await r.json()}catch(e){}
+  if(!r.ok){const err=new Error(j.error||('Ошибка запроса ('+r.status+')'));err.status=r.status;throw err}
+  return j;
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function apiRetry(path,id){
+  for(let i=0;;i++){
+    try{return await api(path)}
+    catch(e){
+      if(e.status!==503||i>=8||id!==reqId)throw e;
+      showState('Подключаюсь к Telegram… попытка '+(i+2));
+      await sleep(2500);
+      if(id!==reqId)throw e;
+    }
+  }
+}
+
+/* ---------- avatars (photos are fetched with auth, lazily, 3 at a time) ---------- */
+const photoCache=new Map();let active=0;const queue=[];
+function pump(){while(active<3&&queue.length){const job=queue.shift();active++;job().finally(()=>{active--;pump()})}}
+function fetchPhoto(id){
+  if(photoCache.has(id))return photoCache.get(id);
+  const p=new Promise(res=>{queue.push(async()=>{
+    try{const r=await fetch('/api/photo/'+encodeURIComponent(id),{headers:{'X-Telegram-Init-Data':initData}});
+      if(!r.ok)return res(null);res(URL.createObjectURL(await r.blob()))}catch(e){res(null)}
+  });pump()});
+  photoCache.set(id,p);return p;
+}
+const io=new IntersectionObserver(es=>{for(const e of es){if(!e.isIntersecting)continue;io.unobserve(e.target);
+  fetchPhoto(e.target.dataset.pid).then(u=>{if(!u)return;const im=new Image();im.alt='';im.src=u;e.target.textContent='';e.target.append(im)})}},{rootMargin:'250px'});
+function avatar(id,title,hasPhoto,size){
+  const a=el('div','av'+(size?' '+size:''),initials(title));a.style.background=colorOf(id);
+  if(hasPhoto){a.dataset.pid=id;io.observe(a)}
+  return a;
+}
+
+/* ---------- state ---------- */
+let reqId=0,msgReq=0,view='chats',cur=null,tab='members',filter='all';
+let chats=[],totals={messages:0,chats:0},members=[],summary=null,feed=[],feedOffset=0,feedMore=false,pollTimer=null,debounce=null;
+
+function setHeader(title,sub,showBack){titleEl.textContent=title;subEl.textContent=sub||'';back.style.display=showBack?'block':'none'}
+function renderSeg(options,active,onPick){
+  seg.replaceChildren();
+  for(const [key,label] of options){const b=el('button',key===active?'on':'',label);b.onclick=()=>onPick(key);seg.append(b)}
+}
+function renderSync(s){
+  if(s&&s.running&&s.total){syncEl.classList.add('on');syncTxt.textContent='Синхронизация '+s.done+'/'+s.total}
+  else syncEl.classList.remove('on');
+}
+
+/* ---------- chats screen ---------- */
+async function loadChats(silent){
+  const id=++reqId;
+  if(!silent){
+    view='chats';cur=null;stats.style.display='none';noteEl.hidden=true;
+    setHeader('Сообщения','',false);query.value='';query.placeholder='Поиск по чатам…';
+    list.replaceChildren();showState('Загружаю чаты…');renderChatSeg();
+  }
+  try{
+    const d=await apiRetry('/api/chats',id);
+    if(id!==reqId||view!=='chats')return;
+    chats=d.items||[];totals=d.totals||totals;renderSync(d.sync);renderChats();
+    clearTimeout(pollTimer);
+    if(d.sync&&d.sync.running)pollTimer=setTimeout(()=>{if(view==='chats')loadChats(true)},6000);
+  }catch(e){if(id===reqId&&!silent)showState(e.message)}
+}
+function renderChatSeg(){
+  renderSeg([['all','Все'],['private','Личные'],['group','Группы'],['db','С данными']],filter,k=>{filter=k;renderChatSeg();renderChats()});
+}
+function renderChats(){
+  const q=query.value.trim().toLowerCase();
+  const rows=chats.filter(c=>{
+    if(filter==='private'&&c.type!=='private')return false;
+    if(filter==='group'&&c.type!=='group')return false;
+    if(filter==='db'&&!c.stored)return false;
+    return !q||((c.title||'')+' '+(c.username||'')+' '+(c.last_text||'')).toLowerCase().includes(q);
+  });
+  subEl.textContent=num(totals.messages)+' '+plural(totals.messages,'сообщение','сообщения','сообщений')+' в базе · '+num(totals.chats)+' '+plural(totals.chats,'чат','чата','чатов');
+  list.replaceChildren();
+  showState(rows.length?'':(q?'Ничего не найдено':(filter==='db'?'Пока нет сохранённых сообщений — синхронизация идёт автоматически.':'Список пуст.')));
+  const frag=document.createDocumentFragment();
+  for(const c of rows){
+    const r=el('div','row');
+    r.append(avatar(c.id,c.title,c.has_photo));
+    const m=el('div','main');
+    const l1=el('div','l1');l1.append(el('div','nm',(c.pinned?'📌 ':'')+(c.title||'Без названия')),el('div','tm',fmtShort(c.last_date)));
+    const l2=el('div','l2');l2.append(el('div','pv',c.last_text||c.kind));
+    if(c.unread)l2.append(el('div','badge mute',c.unread>99?'99+':String(c.unread)));
+    const l3=el('div','l3');
+    l3.append(el('span','chip',c.kind));
+    if(c.members)l3.append(el('span','chip',num(c.members)+' '+plural(c.members,'участник','участника','участников')));
+    l3.append(el('span','chip'+(c.stored?' db':''),c.stored?num(c.stored)+' в базе':'нет в базе'));
+    m.append(l1,l2,l3);r.append(m);r.onclick=()=>openChat(c);frag.append(r);
+  }
+  list.append(frag);
+}
+
+/* ---------- chat screen ---------- */
+function chatSub(c){
+  const parts=[c.kind];if(c.members)parts.push(num(c.members)+' '+plural(c.members,'участник','участника','участников'));
+  return parts.join(' · ');
+}
+async function openChat(c){
+  const id=++reqId;clearTimeout(pollTimer);
+  view='chat';cur=c;tab=c.type==='private'?'msgs':'members';
+  setHeader(c.title||'Без названия',chatSub(c),true);query.value='';
+  list.replaceChildren();stats.style.display='none';noteEl.hidden=true;showState('Загружаю…');renderTabs();setQueryPlaceholder();
+  try{
+    const d=await apiRetry('/api/chats/'+encodeURIComponent(c.id)+'/members',id);
+    if(id!==reqId)return;
+    members=d.items||[];summary=d.summary||{messages:0,authors:0};
+    if(d.note){noteEl.textContent=d.note;noteEl.hidden=false}
+    renderStats();showTab();
+  }catch(e){if(id===reqId)showState(e.message)}
+}
+function renderTabs(){
+  renderSeg([['members','Участники'],['msgs','Сообщения']],tab,k=>{tab=k;query.value='';renderTabs();setQueryPlaceholder();showTab()});
+}
+function setQueryPlaceholder(){query.placeholder=tab==='members'?'Поиск по участникам…':'Поиск по сообщениям…'}
+function renderStats(){
+  stats.replaceChildren();
+  const mk=(v,l)=>{const s=el('div','stat');s.append(el('b','',v),el('span','',l));return s};
+  stats.append(mk(num(summary.messages),'в базе'),mk(num(summary.authors),plural(summary.authors,'автор','автора','авторов')),mk(summary.last?ago(summary.last):'—','последнее'));
+  stats.style.display='grid';
+}
+function showTab(){tab==='members'?renderMembers():loadFeed(true)}
+
+function renderMembers(){
+  const q=query.value.trim().toLowerCase();
+  const rows=members.filter(m=>!q||((m.title||'')+' '+(m.username||'')).toLowerCase().includes(q));
+  list.replaceChildren();
+  showState(rows.length?'':(q?'Ничего не найдено':'Участники не получены.'));
+  const top=Math.max(1,...members.map(m=>m.message_count));
+  const frag=document.createDocumentFragment();
+  for(const m of rows){
+    const r=el('div','row mrow');
+    r.append(avatar(m.id,m.title,m.has_photo,'s'));
+    const mn=el('div','main');
+    const l1=el('div','l1');const nm=el('div','nm',m.title);if(m.is_me)nm.append(el('span','you','вы'));
+    l1.append(nm);
+    const l2=el('div','l2');l2.append(el('div','pv',(m.username?'@'+m.username+' · ':'')+(m.message_count?'был '+ago(m.last_seen):'сообщений нет')));
+    const bar=el('div','bar');const i=el('i');i.style.width=Math.max(m.message_count?3:0,Math.round(m.message_count/top*100))+'%';bar.append(i);
+    mn.append(l1,l2,bar);
+    const cnt=el('div','cnt');cnt.append(el('b','',num(m.message_count)),el('span','',m.message_count?(Math.round(m.share*1000)/10)+'%':''));
+    r.append(mn,cnt);r.onclick=()=>openMember(m);frag.append(r);
+  }
+  list.append(frag);
+}
+
+/* ---------- message feed ---------- */
+function renderMsgs(target,items,lastDay){
+  const frag=document.createDocumentFragment();
+  for(const m of items){
+    const day=fmtDay(m.date);
+    if(day!==lastDay.v){frag.append(el('div','day',day));lastDay.v=day}
+    const box=el('div','msg');const h=el('div','h');
+    const who=el('span','who',m.name||(m.username?'@'+m.username:'ID '+m.user_id));who.style.color=colorOf(m.user_id);
+    h.append(who,el('span','at',fmtTime(m.date)));box.append(h,el('div','tx',m.text));frag.append(box);
+  }
+  target.append(frag);
+}
+function moreButton(onclick){const b=el('button','more','Показать ещё');b.onclick=onclick;return b}
+async function loadFeed(reset){
+  const id=++msgReq;
+  if(reset){feed=[];feedOffset=0;list.replaceChildren();showState('Загружаю сообщения…')}
+  try{
+    const q=encodeURIComponent(query.value.trim());
+    const d=await api('/api/chats/'+encodeURIComponent(cur.id)+'/messages?limit=40&offset='+feedOffset+(q?'&q='+q:''));
+    if(id!==msgReq||view!=='chat'||tab!=='msgs')return;
+    list.querySelectorAll('.more').forEach(b=>b.remove());
+    feedOffset=d.offset;feedMore=d.has_more;
+    const items=d.items||[];feed=feed.concat(items);
+    if(!feed.length){showState(query.value.trim()?'Ничего не найдено':'Сообщения этого чата ещё синхронизируются — загляни через минуту.');return}
+    showState('');
+    const last=list.querySelector('.msg:last-of-type');
+    renderMsgs(list,items,{v:reset?null:lastDayOf(feed,items)});
+    if(feedMore)list.append(moreButton(()=>loadFeed(false)));
+  }catch(e){if(id===msgReq)showState(e.message)}
+}
+function lastDayOf(all,newItems){const prev=all[all.length-newItems.length-1];return prev?fmtDay(prev.date):null}
+
+/* ---------- member sheet ---------- */
+function openMember(m){
+  const ov=el('div','ov'),sh=el('div','sheet');
+  const close=()=>ov.remove();ov.onclick=e=>{if(e.target===ov)close()};
+  const top=el('div','sh-top');top.append(avatar(m.id,m.title,m.has_photo,'l'));
+  const who=el('div');who.append(el('h2','',m.title),el('div','sub',(m.username?'@'+m.username+' · ':'')+'ID '+m.id));
+  const x=el('button','x','✕');x.onclick=close;top.append(who,x);
+  const grid=el('div','grid');
+  const mk=(v,l)=>{const s=el('div','stat');s.append(el('b','',v),el('span','',l));return s};
+  grid.append(mk(num(m.message_count),'сообщений'),mk(m.message_count?(Math.round(m.share*1000)/10)+'%':'—','доля чата'),
+              mk(m.first_seen?fmtFull(m.first_seen):'—','первое'),mk(m.last_seen?fmtFull(m.last_seen):'—','последнее'));
+  const title=el('div','sh-title','Последние сообщения');const box=el('div');
+  sh.append(top,grid,title,box);ov.append(sh);document.body.append(ov);
+  if(!m.message_count){box.append(el('div','state','В базе пока нет сообщений этого участника.'));return}
+  let off=0;const day={v:null};
+  const load=async()=>{
+    try{
+      const d=await api('/api/chats/'+encodeURIComponent(cur.id)+'/messages?limit=20&offset='+off+'&user_id='+encodeURIComponent(m.id));
+      box.querySelectorAll('.more').forEach(b=>b.remove());off=d.offset;
+      renderMsgs(box,d.items||[],day);
+      if(d.has_more)box.append(moreButton(load));
+    }catch(e){box.append(el('div','state',e.message))}
+  };
+  load();
+}
+
+/* ---------- wiring ---------- */
+back.onclick=()=>loadChats(false);
+query.oninput=()=>{
+  if(view==='chats')renderChats();
+  else if(tab==='members')renderMembers();
+  else{clearTimeout(debounce);debounce=setTimeout(()=>loadFeed(true),350)}
+};
+loadChats(false);
+</script>
+</body>
+</html>
