@@ -1,61 +1,34 @@
-"""HTTP health endpoint plus the existing Telegram bot and userbot processes.
-
-Render Web Services must bind to 0.0.0.0:$PORT. The health endpoint is deliberately
-small; Telegram behavior remains in app.main and app.userbot.
-"""
+"""Run the Telegram bot, personal-account client, and authenticated Web App."""
 import asyncio
 import os
 
+from aiohttp import web
+
 from .main import main as bot_main
+from .panel import create_app
 from .userbot import main as userbot_main
 
 
-async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    try:
-        request_line = await asyncio.wait_for(reader.readline(), timeout=5)
-        parts = request_line.decode("latin-1", errors="replace").strip().split()
-        path = parts[1] if len(parts) >= 2 else "/"
-        # Consume request headers so the connection is handled cleanly.
-        while True:
-            line = await asyncio.wait_for(reader.readline(), timeout=5)
-            if line in (b"\r\n", b"\n", b""):
-                break
-
-        if path == "/health":
-            status = "200 OK"
-            body = b'{"status":"ok","service":"watermelon"}'
-            content_type = "application/json; charset=utf-8"
-        else:
-            status = "200 OK"
-            body = b"Watermelon is running. Health check: /health\n"
-            content_type = "text/plain; charset=utf-8"
-
-        response = (
-            f"HTTP/1.1 {status}\r\n"
-            f"Content-Type: {content_type}\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            "Connection: close\r\n\r\n"
-        ).encode("ascii") + body
-        writer.write(response)
-        await writer.drain()
-    except (asyncio.TimeoutError, ConnectionError, BrokenPipeError):
-        pass
-    finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except (ConnectionError, BrokenPipeError):
-            pass
-
-
-async def main() -> None:
+async def run_http_server():
+    app = create_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
     port = int(os.getenv("PORT", "10000"))
-    server = await asyncio.start_server(handle_health, "0.0.0.0", port)
-    print(f"Watermelon health server listening on 0.0.0.0:{port}; GET /health")
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Watermelon panel listening on 0.0.0.0:{port}; GET /health")
+    # Health endpoint used by Render's health checks.
+    async def health(request):
+        return web.json_response({"status": "ok", "service": "watermelon"})
+    app.router.add_get("/health", health)
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
 
-    async with server:
-        # Run both existing Telegram components so neither loses functionality.
-        await asyncio.gather(bot_main(), userbot_main())
+
+async def main():
+    await asyncio.gather(bot_main(), userbot_main(), run_http_server())
 
 
 if __name__ == "__main__":
