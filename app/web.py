@@ -10,17 +10,12 @@ from .userbot import main as userbot_main
 
 
 async def run_http_server():
-    app = create_app()
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(create_app())
     await runner.setup()
     port = int(os.getenv("PORT", "10000"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"Watermelon panel listening on 0.0.0.0:{port}; GET /health")
-    # Health endpoint used by Render's health checks.
-    async def health(request):
-        return web.json_response({"status": "ok", "service": "watermelon"})
-    app.router.add_get("/health", health)
     try:
         await asyncio.Event().wait()
     finally:
