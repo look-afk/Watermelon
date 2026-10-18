@@ -68,3 +68,11 @@ class Storage:
                 (user_id, limit),
             ).fetchall()
         return [row[0] for row in reversed(rows)]
+
+    def get_user_stats(self, chat_id: int, user_id: int) -> dict:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT COUNT(*), MAX(created_at) FROM messages WHERE chat_id=? AND user_id=?",
+                (chat_id, user_id),
+            ).fetchone()
+        return {"message_count": row[0] or 0, "last_seen": row[1]}
