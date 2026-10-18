@@ -17,6 +17,9 @@ class Settings:
     database_path: str = os.getenv("DATABASE_PATH", "messages.db")
     max_messages_per_analysis: int = int(os.getenv("MAX_MESSAGES_PER_ANALYSIS", "100"))
     max_messages_per_sync: int = int(os.getenv("MAX_MESSAGES_PER_SYNC", "5000"))
+    # Extra Telegram user IDs (comma separated) allowed to open the panel.
+    # The account behind TG_SESSION is always allowed.
+    panel_allowed_user_ids: str = os.getenv("PANEL_ALLOWED_USER_IDS", "")
 
 
 settings = Settings()
