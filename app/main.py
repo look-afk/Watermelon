@@ -1,9 +1,10 @@
 import asyncio
 import json
+import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, WebAppInfo
 
 from .analyzer import analyze_messages
 from .config import settings, validate_settings
@@ -25,6 +26,20 @@ async def start(message: Message):
         "Импортируйте только сообщения, которые разрешено обрабатывать."
     )
 
+
+
+@dp.message(Command("panel"))
+async def open_panel(message: Message):
+    panel_url = os.getenv("PANEL_URL", "").strip()
+    if not panel_url:
+        await message.answer("Панель ещё не настроена: добавь PANEL_URL в Environment Render.")
+        return
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Открыть Watermelon", web_app=WebAppInfo(url=panel_url))]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+    await message.answer("Открой панель Watermelon кнопкой ниже.", reply_markup=keyboard)
 
 @dp.message(Command("analyze"))
 async def analyze(message: Message):
