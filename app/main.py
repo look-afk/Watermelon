@@ -4,7 +4,12 @@ import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, WebAppInfo
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    WebAppInfo,
+)
 
 from .analyzer import analyze_messages
 from .config import settings, validate_settings
@@ -27,19 +32,35 @@ async def start(message: Message):
     )
 
 
+def get_panel_url() -> str:
+    explicit = os.getenv("PANEL_URL", "").strip()
+    if explicit:
+        return explicit
+    base = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    # Previously "" + "/panel" gave "/panel", which is truthy, so the
+    # "not configured" check never fired and Telegram rejected the button.
+    return base + "/panel" if base else ""
+
 
 @dp.message(Command("panel"))
 async def open_panel(message: Message):
-    panel_url = os.getenv("PANEL_URL", "").strip() or (os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/") + "/panel")
+    if message.chat.type != "private":
+        await message.answer("Открой панель в личном чате с ботом: /panel")
+        return
+    panel_url = get_panel_url()
     if not panel_url:
         await message.answer("Панель ещё не настроена: добавь PANEL_URL в Environment Render.")
         return
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Открыть Watermelon", web_app=WebAppInfo(url=panel_url))]],
-        resize_keyboard=True,
-        is_persistent=True,
+    if not panel_url.startswith("https://"):
+        await message.answer("Telegram Web App требует HTTPS. Проверь PANEL_URL (должен начинаться с https://).")
+        return
+    # Inline web_app button: Telegram passes signed initData (needed for auth).
+    # Web Apps opened from a reply-keyboard button don't reliably provide it.
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Открыть Watermelon", web_app=WebAppInfo(url=panel_url))]]
     )
     await message.answer("Открой панель Watermelon кнопкой ниже.", reply_markup=keyboard)
+
 
 @dp.message(Command("analyze"))
 async def analyze(message: Message):
