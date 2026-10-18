@@ -89,33 +89,64 @@ async def chats(request):
     from .userbot import get_client
     client = get_client()
     if not client or not client.is_connected():
-        raise web.HTTPServiceUnavailable(text=json.dumps({"error": "Личный аккаунт Telegram ещё подключается"}), content_type="application/json")
-    items = []
-    async for dialog in client.iter_dialogs(limit=300):
-        entity = dialog.entity
-        if getattr(entity, "bot", False):
-            continue
-        if isinstance(entity, User):
-            kind = "Личный чат"
-        elif isinstance(entity, Channel) and getattr(entity, "megagroup", False):
-            kind = "Группа"
-        elif isinstance(entity, Channel):
-            kind = "Канал"
-        elif isinstance(entity, Chat):
-            kind = "Группа"
-        else:
-            kind = "Чат"
-        items.append({
-            "id": dialog.id,
-            "kind": "chat",
-            "title": dialog.name or "Без названия",
-            "description": kind + (" · " + str(dialog.message.message[:75]) if dialog.message and dialog.message.message else ""),
-            "badge": kind,
-            "username": getattr(entity, "username", None),
-            "photo_url": None,
+        raise web.HTTPServiceUnavailable(
+            text=json.dumps({"error": "Личный аккаунт Telegram ещё подключается"}),
+            content_type="application/json",
+        )
+    try:
+        me = await client.get_me()
+        dialogs = await client.get_dialogs(limit=300)
+        items = []
+        for dialog in dialogs:
+            entity = dialog.entity
+            if getattr(entity, "bot", False):
+                continue
+            if isinstance(entity, User):
+                kind = "Личный чат"
+            elif isinstance(entity, Channel) and getattr(entity, "megagroup", False):
+                kind = "Группа"
+            elif isinstance(entity, Channel):
+                kind = "Канал"
+            elif isinstance(entity, Chat):
+                kind = "Группа"
+            else:
+                kind = "Чат"
+            last_text = ""
+            if dialog.message and getattr(dialog.message, "message", None):
+                last_text = str(dialog.message.message).replace("\\n", " ")[:75]
+            items.append({
+                "id": dialog.id,
+                "kind": "chat",
+                "title": dialog.name or "Без названия",
+                "description": kind + (" · " + last_text if last_text else ""),
+                "badge": kind,
+                "username": getattr(entity, "username", None),
+                "photo_url": None,
+            })
+        print(
+            f"Panel chats: account_id={getattr(me, 'id', None)}, "
+            f"dialogs={len(dialogs)}, visible_items={len(items)}"
+        )
+        return web.json_response({
+            "items": items,
+            "debug": {
+                "account_id": getattr(me, "id", None),
+                "account_name": " ".join(filter(None, [
+                    getattr(me, "first_name", None),
+                    getattr(me, "last_name", None),
+                ])),
+                "dialogs_found": len(dialogs),
+                "items_returned": len(items),
+            },
         })
-    return web.json_response({"items": items})
-
+    except Exception as exc:
+        print(f"Panel chats failed: {type(exc).__name__}: {exc}")
+        raise web.HTTPBadGateway(
+            text=json.dumps({
+                "error": f"Не удалось загрузить диалоги Telegram ({type(exc).__name__}). Проверь логи Render."
+            }),
+            content_type="application/json",
+        ) from exc
 
 async def members(request):
     require_auth(request)
