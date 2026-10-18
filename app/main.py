@@ -35,11 +35,7 @@ async def analyze(message: Message):
     if len(parts) == 2 and parts[1].lstrip("-").isdigit():
         chat_id = None
         target_id = int(parts[1])
-    elif (
-        len(parts) == 3
-        and parts[1].lstrip("-").isdigit()
-        and parts[2].isdigit()
-    ):
+    elif len(parts) == 3 and parts[1].lstrip("-").isdigit() and parts[2].isdigit():
         chat_id = int(parts[1])
         target_id = int(parts[2])
     else:
@@ -51,16 +47,9 @@ async def analyze(message: Message):
         return
 
     if chat_id is None:
-        messages = storage.get_messages_all(
-            target_id,
-            settings.max_messages_per_analysis,
-        )
+        messages = storage.get_messages_all(target_id, settings.max_messages_per_analysis)
     else:
-        messages = storage.get_messages(
-            chat_id,
-            target_id,
-            settings.max_messages_per_analysis,
-        )
+        messages = storage.get_messages(chat_id, target_id, settings.max_messages_per_analysis)
 
     if len(messages) < 2:
         await message.answer(
@@ -85,9 +74,7 @@ async def analyze(message: Message):
                 )
     except Exception as exc:
         print(f"Ошибка анализа через бота: {type(exc).__name__}: {exc}")
-        await message.answer(
-            "Не удалось выполнить анализ. Проверь настройки API и логи Render."
-        )
+        await message.answer("Не удалось выполнить анализ. Проверь настройки API и логи Render.")
 
 
 @dp.message(F.text)
@@ -103,6 +90,8 @@ async def collect(message: Message):
         user_id=message.from_user.id,
         username=message.from_user.username,
         message_text=text,
+        telegram_message_id=message.message_id,
+        created_at=message.date.isoformat() if message.date else None,
     )
 
 
