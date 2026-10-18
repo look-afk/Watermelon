@@ -24,8 +24,8 @@ storage = Storage(settings.database_path)
 async def start(message: Message):
     await message.answer(
         "Watermelon User Profiler\n"
-        "История чатов подтягивается автоматически через ваш аккаунт.\n"
-        "/panel — открыть панель с чатами, участниками и сообщениями.\n"
+        "Бот-аналитик: чаты читаются автоматически через ваш аккаунт.\n"
+        "/panel — открыть панель: вкладки «Чаты» и «Люди», профили, связи, статистика.\n"
         "/analyze USER_ID — анализ сообщений пользователя из всех чатов.\n"
         "/analyze CHAT_ID USER_ID — анализ в одном чате."
     )
@@ -120,6 +120,8 @@ async def collect(message: Message):
     text = (message.text or "").strip()
     if not text or text.startswith("/"):
         return
+    if not storage.should_store(message.chat.id, message.from_user.id):
+        return  # excluded chat or ignored person
     storage.save_message(
         chat_id=message.chat.id,
         user_id=message.from_user.id,
