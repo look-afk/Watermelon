@@ -36,6 +36,7 @@ h1{font-size:20px;margin:0 0 3px;font-weight:700}.sub{color:var(--muted);font-si
 <header><h1 id="title">Сообщения</h1><div class="sub" id="subtitle">Чаты, доступные вашему аккаунту Telegram</div>
 <div class="search"><button class="back" id="back">← Назад</button><input id="query" placeholder="Поиск по чатам и участникам…"></div></header>
 <div class="state" id="state">Загружаю…</div><main class="grid" id="grid"></main>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script>
 const grid=document.querySelector('#grid'),state=document.querySelector('#state'),title=document.querySelector('#title'),subtitle=document.querySelector('#subtitle'),query=document.querySelector('#query'),back=document.querySelector('#back');
 let initData='',chatId=null,items=[];
@@ -48,7 +49,6 @@ async function openChat(chat){chatId=chat.id;title.textContent=chat.title;subtit
 function showMember(m){const box=document.createElement('div');box.style.cssText='position:fixed;inset:0;background:#0006;z-index:5;display:grid;place-items:center;padding:18px';const panel=document.createElement('section');panel.style.cssText='background:white;border-radius:14px;padding:20px;max-width:440px;width:100%;max-height:85vh;overflow:auto';const close=document.createElement('button');close.textContent='Закрыть';close.style.cssText='float:right;padding:7px 10px';close.onclick=()=>box.remove();const h=document.createElement('h2');h.textContent=m.title;const p=document.createElement('p');p.textContent=m.description||'Недостаточно данных для краткого описания.';const details=document.createElement('pre');details.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.5 inherit';details.textContent='ID: '+m.id+'\nUsername: '+(m.username?'@'+m.username:'не указан')+'\nСообщений в базе: '+(m.message_count??'нет данных')+'\nПоследнее сообщение: '+(m.last_seen||'неизвестно')+'\n\nДанные основаны на доступном профиле Telegram и сохранённых сообщениях. Неизвестные сведения не предполагаются.';panel.append(close,h,p,details);box.append(panel);box.onclick=e=>{if(e.target===box)box.remove()};document.body.append(box)}
 back.onclick=loadChats;query.oninput=render;loadChats();
 </script>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
 </body></html>"""
 
 
