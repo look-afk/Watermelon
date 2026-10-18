@@ -2,17 +2,24 @@ import asyncio
 import html
 import json
 import os
+import re
 
 from telethon import TelegramClient, events
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, FloodWaitError
 from telethon.sessions import StringSession
-from telethon.tl.types import User
+from telethon.tl.types import Channel, Chat, User
 
 from .analyzer import analyze_messages
 from .config import settings
 from .storage import Storage
 
 _client = None
+
+# Read by the panel to show a small sync indicator.
+SYNC_STATE = {"running": False, "done": 0, "total": 0, "new_messages": 0}
+
+# Own userbot commands must never be stored as chat messages.
+CMD_RE = re.compile(r"^\.(analyze|analyzeall|helpwatermelon)\b")
 
 
 def get_client():
@@ -30,6 +37,87 @@ def split_text(text: str, limit: int = 3500) -> list[str]:
     return [text[i:i + limit] for i in range(0, len(text), limit)] or ["{}"]
 
 
+def display_name(sender) -> str | None:
+    if sender is None:
+        return None
+    first = getattr(sender, "first_name", None) or ""
+    last = getattr(sender, "last_name", None) or ""
+    return (first + " " + last).strip() or getattr(sender, "title", None) or None
+
+
+def is_syncable(dialog) -> bool:
+    """Private chats and groups. Broadcast channels have no useful per-user senders."""
+    entity = dialog.entity
+    if isinstance(entity, User):
+        return not (entity.bot or entity.deleted)
+    if isinstance(entity, Channel):
+        return bool(getattr(entity, "megagroup", False))
+    return isinstance(entity, Chat)
+
+
+async def sync_dialog(client, storage: Storage, dialog, me, limit: int) -> int:
+    """Silently import text history of one chat. First run = backfill up to `limit`
+    messages; later runs only fetch what is newer than the stored marker."""
+    chat_id = dialog.id
+    marker = await asyncio.to_thread(storage.get_sync_marker, chat_id)
+    kwargs = {"limit": limit}
+    if marker:
+        kwargs["min_id"] = marker
+    rows = []
+    max_id = marker or 0
+    async for message in client.iter_messages(chat_id, **kwargs):
+        max_id = max(max_id, message.id)
+        text = (message.message or "").strip()
+        if not text or not message.sender_id or CMD_RE.match(text):
+            continue
+        sender = me if message.out else message.sender
+        if sender is not None and getattr(sender, "bot", False):
+            continue
+        rows.append((
+            chat_id,
+            message.sender_id,
+            getattr(sender, "username", None),
+            display_name(sender),
+            text,
+            message.id,
+            message.date.isoformat() if message.date else None,
+        ))
+    saved = await asyncio.to_thread(storage.save_messages_bulk, rows)
+    await asyncio.to_thread(storage.set_sync_marker, chat_id, max_id)
+    return saved
+
+
+async def auto_sync_loop(client, storage: Storage):
+    await asyncio.sleep(3)
+    me = await client.get_me()
+    while client.is_connected():
+        try:
+            dialogs = [d async for d in client.iter_dialogs(limit=settings.auto_sync_dialogs)]
+            targets = [d for d in dialogs if is_syncable(d)]
+            SYNC_STATE.update(running=True, done=0, total=len(targets), new_messages=0)
+            for dialog in targets:
+                try:
+                    saved = await sync_dialog(client, storage, dialog, me, settings.auto_sync_messages_per_chat)
+                    SYNC_STATE["new_messages"] += saved
+                except FloodWaitError as exc:
+                    # Telegram asked us to slow down; the chat is picked up on the next cycle.
+                    await asyncio.sleep(min(exc.seconds + 1, 900))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    print(f"Автосинхронизация чата {dialog.id} не удалась: {type(exc).__name__}: {exc}")
+                SYNC_STATE["done"] += 1
+                await asyncio.sleep(0.4)
+            print(f"Автосинхронизация завершена: чатов {len(targets)}, новых сообщений {SYNC_STATE['new_messages']}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Ошибка автосинхронизации: {type(exc).__name__}: {exc}")
+        finally:
+            SYNC_STATE["running"] = False
+        await asyncio.sleep(max(1, settings.auto_sync_interval_min) * 60)
+
+
 async def main():
     global _client
     api_id = int(required_env("TG_API_ID"))
@@ -43,15 +131,20 @@ async def main():
     storage = Storage(settings.database_path)
     client = TelegramClient(StringSession(session), api_id, api_hash)
 
-    @client.on(events.NewMessage(incoming=True))
+    # Live collection: incoming AND your own messages, silently.
+    @client.on(events.NewMessage())
     async def collect_message(event):
         try:
             message_text = (event.raw_text or "").strip()
+            if not message_text or CMD_RE.match(message_text) or event.chat_id is None:
+                return
+            if event.is_channel and not event.is_group:
+                return
             sender = await event.get_sender()
-            if not message_text or not sender or getattr(sender, "bot", False):
+            if not sender or getattr(sender, "bot", False):
                 return
             sender_id = getattr(sender, "id", None)
-            if sender_id is None or event.chat_id is None:
+            if sender_id is None:
                 return
             storage.save_message(
                 chat_id=event.chat_id,
@@ -60,71 +153,10 @@ async def main():
                 message_text=message_text,
                 telegram_message_id=event.message.id,
                 created_at=event.message.date.isoformat() if event.message.date else None,
+                sender_name=display_name(sender),
             )
         except Exception as exc:
             print(f"Не удалось сохранить сообщение: {type(exc).__name__}: {exc}")
-
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.sync$"))
-    async def sync_current_chat(event):
-        """Import recent accessible text history only for the chat where .sync was sent."""
-        status = None
-        try:
-            chat_id = event.chat_id
-            if chat_id is None:
-                await event.respond("Не удалось определить текущий чат.")
-                return
-
-            await event.delete()
-            status = await client.send_message(
-                chat_id,
-                f"Синхронизирую доступную историю этого чата (до {settings.max_messages_per_sync} сообщений)…",
-            )
-
-            history = [
-                message async for message in client.iter_messages(
-                    chat_id,
-                    limit=settings.max_messages_per_sync,
-                )
-            ]
-            rows = []
-            skipped = 0
-            for message in reversed(history):
-                message_text = (message.message or "").strip()
-                sender_id = message.sender_id
-                if not message_text or not sender_id or message_text.startswith(".sync"):
-                    skipped += 1
-                    continue
-                sender = message.sender
-                if sender is not None and getattr(sender, "bot", False):
-                    skipped += 1
-                    continue
-                rows.append((
-                    chat_id,
-                    sender_id,
-                    getattr(sender, "username", None) if sender else None,
-                    message_text,
-                    message.id,
-                    message.date.isoformat() if message.date else None,
-                ))
-
-            saved = await asyncio.to_thread(storage.save_messages_bulk, rows)
-            duplicates = len(rows) - saved
-            await status.edit(
-                f"Синхронизация завершена. Обработано сообщений: {len(history)}. "
-                f"Добавлено новых текстовых сообщений: {saved}. "
-                f"Уже были в базе: {duplicates}. Пропущено: {skipped}.\n"
-                "Теперь открой бота и отправь /analyze USER_ID. "
-                "Для другого чата отдельно выполни .sync в том чате."
-            )
-        except Exception as exc:
-            print(f"Ошибка синхронизации истории: {type(exc).__name__}: {exc}")
-            try:
-                if status:
-                    await status.edit("Не удалось синхронизировать историю. Проверь логи Render.")
-                else:
-                    await event.respond("Не удалось синхронизировать историю. Проверь логи Render.")
-            except Exception:
-                pass
 
     @client.on(events.NewMessage(outgoing=True, pattern=r"^\.analyze(?:\s+(\d+))?$"))
     async def analyze_current_chat(event):
@@ -136,9 +168,9 @@ async def main():
             elif not isinstance(chat, User) or getattr(chat, "bot", False):
                 await event.respond("Укажи ID пользователя: .analyze USER_ID")
                 return
-
             else:
                 target_id = chat.id
+
             await event.delete()
             rows = []
             async for message in client.iter_messages(
@@ -147,7 +179,7 @@ async def main():
                 from_user=target_id,
             ):
                 text = (message.message or "").strip()
-                if text and not text.startswith(".analyze"):
+                if text and not CMD_RE.match(text):
                     rows.append(text)
             rows.reverse()
             if len(rows) < 2:
@@ -175,10 +207,10 @@ async def main():
                 await client.send_message(
                     event.chat_id,
                     "Недостаточно сохранённых сообщений этого пользователя. "
-                    "Выполни .sync в нужных чатах или дождись новых сообщений.",
+                    "Они подтягиваются автоматически — подожди завершения синхронизации.",
                 )
                 return
-            await client.send_message(event.chat_id, f"Анализирую {len(rows)} сообщений из синхронизированных чатов…")
+            await client.send_message(event.chat_id, f"Анализирую {len(rows)} сохранённых сообщений…")
             result = await asyncio.to_thread(analyze_messages, rows)
             output = html.escape(json.dumps(result, ensure_ascii=False, indent=2))
             for chunk in split_text(output):
@@ -193,15 +225,14 @@ async def main():
         await client.send_message(
             event.chat_id,
             "Watermelon Userbot\n"
-            ".sync — импортировать доступную историю текущего чата в базу Watermelon.\n"
+            "История чатов синхронизируется автоматически, данные смотри в панели бота (/panel).\n"
             ".analyze USER_ID — анализ истории пользователя в текущем чате.\n"
             ".analyze — в личном чате анализ собеседника.\n"
-            ".analyzeall USER_ID — анализ сохранённых сообщений пользователя из синхронизированных чатов.\n"
-            ".helpwatermelon — эта справка.\n\n"
-            "Синхронизируй только чаты, в которых у тебя есть право обрабатывать сообщения."
+            ".analyzeall USER_ID — анализ сохранённых сообщений пользователя из всех чатов.\n"
+            ".helpwatermelon — эта справка."
         )
 
-    # Avoid an interactive login prompt on Render when StringSession is invalid.
+    # client.start() with an invalid StringSession asks for a phone number, which hangs on Render.
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -216,14 +247,12 @@ async def main():
 
     _client = client
     me = await client.get_me()
-    print(f"Watermelon Userbot запущен для аккаунта ID {me.id}.")
-    print(
-        f"Сбор новых входящих текстовых сообщений включён. "
-        f"Для импорта истории конкретного чата отправь .sync (лимит: {settings.max_messages_per_sync})."
-    )
+    print(f"Watermelon Userbot запущен для аккаунта ID {me.id}. Автосинхронизация истории включена.")
+    sync_task = asyncio.create_task(auto_sync_loop(client, storage))
     try:
         await client.run_until_disconnected()
     finally:
+        sync_task.cancel()
         _client = None
 
 
