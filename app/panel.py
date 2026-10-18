@@ -3,122 +3,25 @@ import hashlib
 import hmac
 import json
 import time
+from collections import OrderedDict
+from pathlib import Path
 from urllib.parse import parse_qsl
 
 from aiohttp import web
-from telethon.errors import ChannelPrivateError, ChatAdminRequiredError, FloodWaitError
+from telethon.errors import FloodWaitError
 from telethon.tl.types import Channel, Chat, User
 
 from .config import settings
 from .storage import Storage
 
-HTML = r"""<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Watermelon · Панель</title>
-<style>
-:root{color-scheme:light;--blue:#168cff;--line:#d9e5ef;--muted:#7b8794;--bg:#f6f8fa}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#18212b}
-header{padding:18px 18px 10px;position:sticky;top:0;background:#f6f8faf2;backdrop-filter:blur(12px);z-index:2}
-h1{font-size:20px;margin:0 0 3px;font-weight:700}.sub{color:var(--muted);font-size:12px}
-.search{display:flex;gap:8px;margin-top:14px}.search input{width:100%;border:1px solid var(--line);background:white;border-radius:10px;padding:11px 12px;font:inherit;outline-color:var(--blue)}
-.back{border:1px solid var(--line);background:white;border-radius:10px;padding:0 13px;font:inherit;display:none}
-.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px;padding:5px 18px 22px}
-.card{min-width:0;text-align:left;border:0;background:transparent;padding:0;cursor:pointer;color:inherit}
-.avatar{width:100%;aspect-ratio:1/1;border-radius:3px;background:#1b450d;color:white;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:22px;font-weight:600}
-.avatar img{width:100%;height:100%;object-fit:cover}.info{padding:7px 1px 0}.name{font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.desc{font-size:11px;color:var(--muted);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:30px}
-.state{padding:20px 18px;color:var(--muted)}.badge{display:inline-block;border:1px solid var(--line);border-radius:20px;padding:3px 7px;font-size:10px;margin-top:5px;color:#56616d;background:white}
-@media(max-width:560px){.grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:13px;padding:4px 12px 18px}header{padding:15px 12px 9px}.avatar{font-size:18px}}
-</style>
-</head>
-<body>
-<header><h1 id="title">Сообщения</h1><div class="sub" id="subtitle">Чаты, доступные вашему аккаунту Telegram</div>
-<div class="search"><button class="back" id="back">← Назад</button><input id="query" placeholder="Поиск по чатам и участникам…"></div></header>
-<div class="state" id="state">Загружаю…</div><main class="grid" id="grid"></main>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script>
-const $=s=>document.querySelector(s);
-const grid=$('#grid'),state=$('#state'),title=$('#title'),subtitle=$('#subtitle'),query=$('#query'),back=$('#back');
-let initData='',items=[],reqId=0;
-try{const tg=window.Telegram&&window.Telegram.WebApp;if(tg){initData=tg.initData||'';tg.ready();tg.expand()}}catch(e){}
-function initials(s){return (s||'?').trim().split(/\s+/).slice(0,2).map(x=>x[0]||'').join('').toUpperCase()||'?'}
-function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
-function showState(t){state.textContent=t;state.hidden=!t}
-async function api(path){
-  const r=await fetch(path,{headers:{'X-Telegram-Init-Data':initData}});
-  let j={};try{j=await r.json()}catch(e){}
-  if(!r.ok){const err=new Error(j.error||('Ошибка запроса ('+r.status+')'));err.status=r.status;throw err}
-  return j;
-}
-async function apiRetry(path,id){
-  for(let i=0;;i++){
-    try{return await api(path)}
-    catch(e){
-      if(e.status!==503||i>=8||id!==reqId)throw e;
-      showState('Подключаюсь к Telegram… попытка '+(i+2));
-      await sleep(2500);
-      if(id!==reqId)throw e;
-    }
-  }
-}
-function render(){
-  grid.innerHTML='';
-  const q=query.value.trim().toLowerCase();
-  const list=items.filter(x=>((x.title||'')+' '+(x.description||'')+' '+(x.username||'')).toLowerCase().includes(q));
-  showState(list.length?'':(q?'Ничего не найдено':'Список пуст или нет доступа к данным.'));
-  const frag=document.createDocumentFragment();
-  for(const x of list){
-    const b=document.createElement('button');b.className='card';
-    b.innerHTML='<div class="avatar"></div><div class="info"><div class="name"></div><div class="desc"></div><span class="badge"></span></div>';
-    const a=b.querySelector('.avatar');
-    if(x.photo_url){const im=document.createElement('img');im.src=x.photo_url;im.alt='';im.onerror=()=>{im.remove();a.textContent=initials(x.title)};a.append(im)}
-    else a.textContent=initials(x.title);
-    b.querySelector('.name').textContent=x.title||'Без названия';
-    b.querySelector('.desc').textContent=x.description||'Описание пока недоступно';
-    b.querySelector('.badge').textContent=x.badge||'';
-    b.onclick=()=>x.kind==='chat'?openChat(x):showMember(x);
-    frag.append(b);
-  }
-  grid.append(frag);
-}
-async function loadChats(){
-  const id=++reqId;
-  back.style.display='none';title.textContent='Сообщения';subtitle.textContent='Чаты, доступные вашему аккаунту Telegram';
-  query.placeholder='Поиск по чатам…';query.value='';items=[];grid.innerHTML='';showState('Загружаю чаты…');
-  try{
-    const d=await apiRetry('/api/chats',id);
-    if(id!==reqId)return;
-    items=d.items||[];
-    if(!items.length){
-      showState(d.debug? `Диалогов найдено: ${d.debug.dialogs_found}; карточек: ${d.debug.items_returned}; аккаунт: ${d.debug.account_name||d.debug.account_id}. Если это не ваш аккаунт — проверьте TG_SESSION.`:'Список пуст.');
-      return;
-    }
-    render();
-  }catch(e){if(id===reqId)showState(e.message)}
-}
-async function openChat(chat){
-  const id=++reqId;
-  title.textContent=chat.title;subtitle.textContent='Участники чата';back.style.display='block';
-  query.placeholder='Поиск по участникам…';query.value='';items=[];grid.innerHTML='';showState('Загружаю участников…');
-  try{
-    const d=await apiRetry('/api/chats/'+encodeURIComponent(chat.id)+'/members',id);
-    if(id!==reqId)return;
-    items=d.items||[];
-    if(!items.length){showState(`Участники не получены. Загружено: ${d.total_loaded??0}. Telegram может ограничивать список участников.`);return}
-    render();
-  }catch(e){if(id===reqId)showState(e.message)}
-}
-function showMember(m){const box=document.createElement('div');box.style.cssText='position:fixed;inset:0;background:#0006;z-index:5;display:grid;place-items:center;padding:18px';const panel=document.createElement('section');panel.style.cssText='background:white;border-radius:14px;padding:20px;max-width:440px;width:100%;max-height:85vh;overflow:auto';const close=document.createElement('button');close.textContent='Закрыть';close.style.cssText='float:right;padding:7px 10px';close.onclick=()=>box.remove();const h=document.createElement('h2');h.textContent=m.title;const p=document.createElement('p');p.textContent=m.description||'Недостаточно данных для краткого описания.';const details=document.createElement('pre');details.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.5 inherit';details.textContent='ID: '+m.id+'\nUsername: '+(m.username?'@'+m.username:'не указан')+'\nСообщений в базе: '+(m.message_count??'нет данных')+'\nПоследнее сообщение: '+(m.last_seen||'неизвестно')+'\n\nДанные основаны на доступном профиле Telegram и сохранённых сообщениях. Неизвестные сведения не предполагаются.';panel.append(close,h,p,details);box.append(panel);box.onclick=e=>{if(e.target===box)box.remove()};document.body.append(box)}
-back.onclick=loadChats;query.oninput=render;loadChats();
-</script>
-</body></html>"""
+# The page lives in its own file so it is easy to edit.
+HTML = Path(__file__).with_name("panel.html").read_text(encoding="utf-8")
 
 
 def json_error(status: int, message: str, **extra) -> web.HTTPException:
     cls = {
         400: web.HTTPBadRequest, 401: web.HTTPUnauthorized, 403: web.HTTPForbidden,
-        429: web.HTTPTooManyRequests, 500: web.HTTPInternalServerError,
+        404: web.HTTPNotFound, 429: web.HTTPTooManyRequests, 500: web.HTTPInternalServerError,
         502: web.HTTPBadGateway, 503: web.HTTPServiceUnavailable,
     }.get(status, web.HTTPInternalServerError)
     return cls(text=json.dumps({"error": message, **extra}, ensure_ascii=False), content_type="application/json")
@@ -213,6 +116,24 @@ async def resolve_entity(client, chat_id: int):
         return await client.get_entity(chat_id)
 
 
+def has_photo(entity) -> bool:
+    photo = getattr(entity, "photo", None)
+    return photo is not None and not type(photo).__name__.endswith("Empty")
+
+
+def full_name(entity) -> str:
+    first = getattr(entity, "first_name", None) or ""
+    last = getattr(entity, "last_name", None) or ""
+    return (first + " " + last).strip() or getattr(entity, "title", None) or ""
+
+
+def get_sync_state() -> dict:
+    from .userbot import SYNC_STATE
+    return dict(SYNC_STATE)
+
+
+# ---------------------------------------------------------------- pages / api
+
 async def index(request):
     return web.Response(text=HTML, content_type="text/html", headers={"Cache-Control": "no-store"})
 
@@ -226,68 +147,150 @@ async def chats(request):
     except Exception as exc:
         print(f"Panel chats failed: {type(exc).__name__}: {exc}")
         raise json_error(502, f"Не удалось загрузить диалоги Telegram ({type(exc).__name__}). Проверь логи Render.") from exc
+
+    storage = Storage(settings.database_path)
+    counts = storage.get_chat_counts()
     items = []
     for dialog in dialogs:
         entity = dialog.entity
         if getattr(entity, "bot", False):
             continue
         if isinstance(entity, User):
-            kind = "Личный чат"
+            ctype, kind = "private", "Личный чат"
         elif isinstance(entity, Channel) and getattr(entity, "megagroup", False):
-            kind = "Группа"
+            ctype, kind = "group", "Группа"
         elif isinstance(entity, Channel):
-            kind = "Канал"
+            ctype, kind = "channel", "Канал"
         elif isinstance(entity, Chat):
-            kind = "Группа"
+            ctype, kind = "group", "Группа"
         else:
-            kind = "Чат"
+            ctype, kind = "group", "Чат"
+        message = dialog.message
         last_text = ""
-        if dialog.message and getattr(dialog.message, "message", None):
-            last_text = " ".join(str(dialog.message.message).split())[:75]
+        if message is not None:
+            text = getattr(message, "message", None)
+            if text:
+                last_text = " ".join(str(text).split())[:120]
+            elif getattr(message, "media", None):
+                last_text = "[медиа]"
+        stored, last_stored = counts.get(dialog.id, (0, None))
         items.append({
-            "id": dialog.id, "kind": "chat", "title": dialog.name or "Без названия",
-            "description": kind + (" · " + last_text if last_text else ""),
-            "badge": kind, "username": getattr(entity, "username", None), "photo_url": None,
+            "id": dialog.id,
+            "type": ctype,
+            "kind": kind,
+            "title": dialog.name or "Без названия",
+            "username": getattr(entity, "username", None),
+            "has_photo": has_photo(entity),
+            "last_text": last_text,
+            "last_date": dialog.date.isoformat() if dialog.date else None,
+            "unread": dialog.unread_count or 0,
+            "pinned": bool(dialog.pinned),
+            "members": getattr(entity, "participants_count", None),
+            "stored": stored,
+            "last_stored": last_stored,
         })
     print(f"Panel chats: account_id={me.id}, dialogs={len(dialogs)}, visible_items={len(items)}")
-    return web.json_response({"items": items, "debug": {
-        "account_id": me.id, "account_name": " ".join(filter(None, [me.first_name, me.last_name])),
-        "dialogs_found": len(dialogs), "items_returned": len(items),
-    }})
+    return web.json_response({
+        "items": items,
+        "totals": storage.get_totals(),
+        "sync": get_sync_state(),
+        "me": {"id": me.id, "name": full_name(me)},
+    })
+
+
+_photo_cache: "OrderedDict[int, bytes]" = OrderedDict()
+_photo_sem = asyncio.Semaphore(3)
+_PHOTO_CACHE_MAX = 500
+
+
+async def photo(request):
+    client, _ = await authorize(request)
+    try:
+        peer_id = int(request.match_info["peer_id"])
+    except ValueError:
+        raise json_error(400, "Некорректный ID")
+    data = _photo_cache.get(peer_id)
+    if data is None:
+        async with _photo_sem:
+            try:
+                entity = await client.get_entity(peer_id)
+                data = await client.download_profile_photo(entity, file=bytes, download_big=False) or b""
+            except FloodWaitError:
+                raise
+            except Exception:
+                data = b""
+        _photo_cache[peer_id] = data
+        if len(_photo_cache) > _PHOTO_CACHE_MAX:
+            _photo_cache.popitem(last=False)
+    if not data:
+        raise web.HTTPNotFound(text="no photo")
+    return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
 async def members(request):
-    client, _me_obj = await authorize(request)
+    client, me = await authorize(request)
     try:
         chat_id = int(request.match_info["chat_id"])
     except ValueError:
         raise json_error(400, "Некорректный ID чата")
+
+    storage = Storage(settings.database_path)
+    db_users = storage.get_chat_senders(chat_id)
+    summary = storage.get_chat_summary(chat_id)
+
+    participants = {}
+    note = None
     try:
         entity = await resolve_entity(client, chat_id)
-        stats_by_user = Storage(settings.database_path).get_chat_stats(chat_id)
-        items = []
-        count = 0
         async for participant in client.iter_participants(entity, limit=500):
             if getattr(participant, "bot", False):
                 continue
-            count += 1
-            first = getattr(participant, "first_name", None) or ""
-            last = getattr(participant, "last_name", None) or ""
-            title = (first + " " + last).strip() or getattr(participant, "title", None) or "Без имени"
-            username = getattr(participant, "username", None)
-            stats = stats_by_user.get(participant.id, {"message_count": 0, "last_seen": None})
-            items.append({
-                "id": participant.id, "kind": "member", "title": title, "username": username,
-                "description": ("@" + username if username else "Username не указан") + " · сообщений в базе: " + str(stats["message_count"]),
-                "message_count": stats["message_count"], "last_seen": stats["last_seen"],
-                "badge": "Участник", "photo_url": None,
-            })
-        items.sort(key=lambda x: (-x["message_count"], x["title"].lower()))
-        return web.json_response({"items": items, "total_loaded": count, "limit": 500})
-    except (ChatAdminRequiredError, ChannelPrivateError) as exc:
-        raise json_error(403, "Не удалось получить участников. Возможно, Telegram ограничивает доступ к списку участников этого чата.") from exc
-    except ValueError as exc:
-        raise json_error(400, "Чат не найден среди диалогов этого аккаунта.") from exc
+            participants[participant.id] = participant
+    except FloodWaitError:
+        raise
+    except ValueError:
+        raise json_error(400, "Чат не найден среди диалогов этого аккаунта.")
+    except Exception as exc:
+        # Broadcast channels / hidden member lists: fall back to people seen in stored messages.
+        print(f"Panel members {chat_id}: {type(exc).__name__}: {exc}")
+        note = "Telegram не отдаёт полный список участников — показаны авторы сохранённых сообщений."
+
+    items = []
+    for uid in set(participants) | set(db_users):
+        participant = participants.get(uid)
+        stats = db_users.get(uid) or {}
+        name = (full_name(participant) if participant else "") or stats.get("name") or f"ID {uid}"
+        username = (getattr(participant, "username", None) if participant else None) or stats.get("username")
+        count = stats.get("message_count", 0)
+        items.append({
+            "id": uid,
+            "title": name,
+            "username": username,
+            "has_photo": has_photo(participant) if participant else False,
+            "message_count": count,
+            "share": round(count / summary["messages"], 4) if summary["messages"] else 0,
+            "first_seen": stats.get("first_seen"),
+            "last_seen": stats.get("last_seen"),
+            "in_chat": participant is not None,
+            "is_me": uid == me.id,
+        })
+    items.sort(key=lambda x: (-x["message_count"], x["title"].lower()))
+    return web.json_response({"items": items, "summary": summary, "note": note, "total_loaded": len(participants)})
+
+
+async def messages(request):
+    await authorize(request)
+    try:
+        chat_id = int(request.match_info["chat_id"])
+        user_id = request.query.get("user_id")
+        user_id = int(user_id) if user_id else None
+        limit = max(1, min(int(request.query.get("limit", "40")), 100))
+        offset = max(0, int(request.query.get("offset", "0")))
+    except ValueError:
+        raise json_error(400, "Некорректные параметры")
+    query = (request.query.get("q") or "").strip()[:100] or None
+    rows = Storage(settings.database_path).get_chat_messages(chat_id, user_id, limit + 1, offset, query)
+    return web.json_response({"items": rows[:limit], "has_more": len(rows) > limit, "offset": offset + min(len(rows), limit)})
 
 
 async def health(request):
@@ -300,5 +303,7 @@ def create_app():
     app.router.add_get("/", index)
     app.router.add_get("/panel", index)
     app.router.add_get("/api/chats", chats)
+    app.router.add_get("/api/photo/{peer_id}", photo)
     app.router.add_get("/api/chats/{chat_id}/members", members)
+    app.router.add_get("/api/chats/{chat_id}/messages", messages)
     return app
