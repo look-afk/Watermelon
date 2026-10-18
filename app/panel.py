@@ -137,15 +137,15 @@ async def members(request):
             last = getattr(participant, "last_name", None) or ""
             title = (first + " " + last).strip() or getattr(participant, "title", None) or "Без имени"
             username = getattr(participant, "username", None)
-            messages = storage.get_messages(entity.id, participant.id, 1)
+            stats = storage.get_user_stats(entity.id, participant.id)
             items.append({
                 "id": participant.id,
                 "kind": "member",
                 "title": title,
                 "username": username,
-                "description": ("@" + username if username else "Username не указан") + " · " + ("есть сохранённые сообщения" if messages else "сообщения ещё не сохранены"),
-                "message_count": None,
-                "last_seen": None,
+                "description": ("@" + username if username else "Username не указан") + " · сообщений в базе: " + str(stats["message_count"]),
+                "message_count": stats["message_count"],
+                "last_seen": stats["last_seen"],
                 "badge": "Участник",
                 "photo_url": None,
             })
