@@ -30,7 +30,7 @@ async def start(message: Message):
 
 @dp.message(Command("panel"))
 async def open_panel(message: Message):
-    panel_url = os.getenv("PANEL_URL", "").strip()
+    panel_url = os.getenv("PANEL_URL", "").strip() or (os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/") + "/panel")
     if not panel_url:
         await message.answer("Панель ещё не настроена: добавь PANEL_URL в Environment Render.")
         return
