@@ -72,7 +72,8 @@ class Storage:
             con.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_user ON messages(chat_id, user_id, id)")
             con.execute("CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, id)")
             con.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages(chat_id, created_at)")
-            con.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_telegram_id
+            con.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_telegram_id
                 ON messages(chat_id, telegram_message_id)
                 WHERE telegram_message_id IS NOT NULL
             """)
@@ -94,6 +95,16 @@ class Storage:
             con.execute("""CREATE TABLE IF NOT EXISTS profiles (
                 user_id INTEGER PRIMARY KEY, data TEXT, updated_at TEXT,
                 msg_count INTEGER NOT NULL DEFAULT 0, error TEXT, error_at TEXT)""")
+            cols = {r[1] for r in con.execute("PRAGMA table_info(sync_marks)")}
+            if "bf_min_id" not in cols:
+                con.execute("ALTER TABLE sync_marks ADD COLUMN bf_min_id INTEGER")
+            if "bf_done" not in cols:
+                con.execute("ALTER TABLE sync_marks ADD COLUMN bf_done INTEGER NOT NULL DEFAULT 0")
+            # Per-person "reading notes": level 1 = one fragment of the conversation, level 2 = yearly roll-up.
+            con.execute("""CREATE TABLE IF NOT EXISTS profile_notes (
+                user_id INTEGER NOT NULL, level INTEGER NOT NULL, key TEXT NOT NULL,
+                fp TEXT NOT NULL, msg_count INTEGER NOT NULL DEFAULT 0, period TEXT, data TEXT NOT NULL,
+                updated_at TEXT, PRIMARY KEY (user_id, level, key))""")
             # people that exist in older databases (before the people table)
             con.execute("""INSERT OR IGNORE INTO people (user_id, name, username, updated_at)
                            SELECT user_id, MAX(sender_name), MAX(username), ? FROM messages GROUP BY user_id""", (_now(),))
@@ -159,11 +170,18 @@ class Storage:
                 (chat_id, 1 if excluded else 0),
             )
             if excluded:
+                affected = [r[0] for r in con.execute(
+                    "SELECT DISTINCT user_id FROM messages WHERE chat_id=? AND user_id NOT IN "
+                    "(SELECT user_id FROM person_rules WHERE tracked=1)", (chat_id,))]
                 purged = con.execute(
                     "DELETE FROM messages WHERE chat_id=? AND user_id NOT IN "
                     "(SELECT user_id FROM person_rules WHERE tracked=1)", (chat_id,)
                 ).rowcount
                 con.execute("DELETE FROM sync_marks WHERE chat_id=? AND user_id=0", (chat_id,))
+                # what was learned from this chat must not survive: drop notes, force a rebuild of the profiles
+                for uid in affected:
+                    con.execute("DELETE FROM profile_notes WHERE user_id=?", (uid,))
+                    con.execute("UPDATE profiles SET msg_count=0 WHERE user_id=?", (uid,))
         self._invalidate_rules()
         return purged
 
@@ -188,6 +206,7 @@ class Storage:
             if cur_ignored:
                 purged = con.execute("DELETE FROM messages WHERE user_id=?", (user_id,)).rowcount
                 con.execute("DELETE FROM profiles WHERE user_id=?", (user_id,))
+                con.execute("DELETE FROM profile_notes WHERE user_id=?", (user_id,))
         self._invalidate_rules()
         return purged
 
@@ -272,6 +291,67 @@ class Storage:
                    synced_max_id = MAX(synced_max_id, excluded.synced_max_id), updated_at = excluded.updated_at""",
                 (chat_id, user_id, max_id, _now()),
             )
+
+    def get_sync_state(self, chat_id: int, user_id: int = 0) -> dict | None:
+        with self._connect() as con:
+            row = con.execute("SELECT synced_max_id, bf_min_id, bf_done FROM sync_marks WHERE chat_id=? AND user_id=?",
+                              (chat_id, user_id)).fetchone()
+        return {"max_id": row[0] or 0, "bf_min_id": row[1], "bf_done": bool(row[2])} if row else None
+
+    def set_sync_state(self, chat_id: int, user_id: int = 0, max_id: int | None = None,
+                       bf_min_id: int | None = None, bf_done: bool | None = None) -> None:
+        """Resumable history import: max_id only grows, bf_min_id (oldest id reached) only shrinks."""
+        with self._connect() as con:
+            con.execute(
+                """INSERT INTO sync_marks (chat_id, user_id, synced_max_id, updated_at, bf_min_id, bf_done)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                     synced_max_id = MAX(synced_max_id, excluded.synced_max_id),
+                     bf_min_id = CASE WHEN excluded.bf_min_id IS NULL THEN bf_min_id
+                                      WHEN bf_min_id IS NULL THEN excluded.bf_min_id
+                                      ELSE MIN(bf_min_id, excluded.bf_min_id) END,
+                     bf_done = MAX(bf_done, excluded.bf_done),
+                     updated_at = excluded.updated_at""",
+                (chat_id, user_id, max_id or 0, _now(), bf_min_id, 1 if bf_done else 0))
+
+    # ================= deep-reading notes =================
+    def get_person_all(self, user_id: int) -> list[tuple]:
+        """Every stored message of the person, oldest first: (chat_id, tg_id, created_at, text, reply_to)."""
+        with self._connect() as con:
+            return con.execute(
+                "SELECT chat_id, telegram_message_id, created_at, message_text, reply_to_msg_id FROM messages "
+                "WHERE user_id=? ORDER BY created_at, id", (user_id,)).fetchall()
+
+    def get_my_messages_range(self, me_id: int, chat_ids: list[int], start_iso: str, end_iso: str) -> list[tuple]:
+        if not chat_ids:
+            return []
+        marks = ",".join("?" * len(chat_ids))
+        with self._connect() as con:
+            return con.execute(
+                f"SELECT chat_id, telegram_message_id, created_at, message_text FROM messages "
+                f"WHERE user_id=? AND chat_id IN ({marks}) AND created_at >= ? AND created_at <= ? "
+                f"ORDER BY created_at, id LIMIT 1500", [me_id, *chat_ids, start_iso, end_iso]).fetchall()
+
+    def get_notes(self, user_id: int, level: int) -> dict[str, dict]:
+        with self._connect() as con:
+            rows = con.execute("SELECT key, fp, msg_count, period, data FROM profile_notes WHERE user_id=? AND level=?",
+                               (user_id, level)).fetchall()
+        return {k: {"fp": fp, "msg_count": c, "period": per, "data": json.loads(d)} for k, fp, c, per, d in rows}
+
+    def save_note(self, user_id: int, level: int, key: str, fp: str, msg_count: int, period: str, data: dict) -> None:
+        with self._connect() as con:
+            con.execute(
+                """INSERT INTO profile_notes (user_id, level, key, fp, msg_count, period, data, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, level, key) DO UPDATE SET fp=excluded.fp, msg_count=excluded.msg_count,
+                   period=excluded.period, data=excluded.data, updated_at=excluded.updated_at""",
+                (user_id, level, key, fp, msg_count, period, json.dumps(data, ensure_ascii=False), _now()))
+
+    def delete_notes_except(self, user_id: int, level: int, keep_keys: set) -> None:
+        with self._connect() as con:
+            have = [r[0] for r in con.execute("SELECT key FROM profile_notes WHERE user_id=? AND level=?", (user_id, level))]
+            con.executemany("DELETE FROM profile_notes WHERE user_id=? AND level=? AND key=?",
+                            [(user_id, level, k) for k in have if k not in keep_keys])
 
     # ================= classic reads (used by the bot's /analyze) =================
     def get_messages(self, chat_id: int, user_id: int, limit: int) -> list[str]:
@@ -563,7 +643,8 @@ class Storage:
                    WHERE m.user_id != ? AND COALESCE(r.ignored, 0) = 0
                      AND (p.error_at IS NULL OR p.error_at < ?)
                    GROUP BY m.user_id
-                   HAVING c >= ? AND (p.data IS NULL OR c - pc >= ?)
-                   ORDER BY (c - pc) DESC LIMIT ?""",
+                   HAVING c >= ? AND (p.data IS NULL OR c - pc >= ?
+                          OR p.data NOT LIKE '%"coverage"%')   -- shallow profiles of the old version: re-read deeply
+                   ORDER BY (p.data IS NULL) DESC, (c - pc) DESC LIMIT ?""",
                 (exclude_id, backoff, min_messages, refresh_new, limit)).fetchall()
         return [r[0] for r in rows]
