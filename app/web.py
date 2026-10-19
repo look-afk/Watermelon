@@ -10,8 +10,8 @@ from . import backup
 from .diagnostics import install_error_capture
 from .config import settings
 from .main import main as bot_main
-from ..panel import create_app
-from ..userbot import main as userbot_main
+from .panel import create_app
+from .userbot import main as userbot_main
 
 
 async def run_http_server():
