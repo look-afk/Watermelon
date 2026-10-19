@@ -13,7 +13,7 @@ from telethon.tl.types import Channel, Chat
 
 from .backup import request_backup
 from .config import settings
-from .profiles import INFLIGHT, person_stats, run_analysis
+from .profiles import INFLIGHT, PROGRESS, person_stats, run_analysis
 from .storage import Storage
 
 HTML = Path(__file__).with_name("panel.html").read_text(encoding="utf-8")
@@ -360,7 +360,8 @@ async def person(request):
         "reply_delay": delays,
         "analysis": analysis,
         "analysis_error": (profile or {}).get("error"),
-        "analyzing": uid in INFLIGHT,
+        "analyzing": uid in INFLIGHT or uid in PROGRESS,
+        "progress": PROGRESS.get(uid),
         "llm": bool(settings.llm_api_key),
         "min_messages": settings.profile_min_messages,
     })
