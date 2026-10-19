@@ -268,7 +268,7 @@ async def chat_members(request):
         raise json_error(400, "Чат не найден среди диалогов этого аккаунта.")
     except Exception as exc:
         print(f"Panel members {chat_id}: {type(exc).__name__}: {exc}")
-        note = "Telegram не отдаёт полн��й список участников — показаны авторы сохранённых сообщений."
+        note = "Telegram не отдаёт полный список участников — показаны авторы сохранённых сообщений."
 
     items = []
     for uid in set(participants) | set(db_users):
@@ -419,12 +419,21 @@ async def person_rule(request):
 
 
 async def health(request):
-    return web.json_response({"status": "ok", "service": "watermelon"})
+    """Public, unauthenticated, instant. Built for uptime monitors (UptimeRobot, Render health checks):
+    always answers 200 while the process is alive, on GET and HEAD. The `userbot` field lets a
+    Keyword monitor ("connected") also alert when the Telegram account is disconnected."""
+    from .userbot import get_client
+    client = get_client()
+    connected = bool(client and client.is_connected())
+    return web.json_response(
+        {"status": "ok", "service": "watermelon", "userbot": "connected" if connected else "connecting"},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def create_app():
     app = web.Application(middlewares=[json_errors])
-    app.router.add_get("/health", health)
+    app.router.add_route("*", "/health", health)  # GET and HEAD (UptimeRobot may use either)
     app.router.add_get("/", index)
     app.router.add_get("/panel", index)
     app.router.add_get("/api/chats", chats)
