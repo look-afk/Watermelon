@@ -239,8 +239,10 @@ function setCorner(label,fn){
 }
 function renderSync(s){
   if(s&&s.running&&s.total){syncEl.classList.add('on');syncTxt.textContent='Синхронизация '+s.done+'/'+s.total}
+  else if(s&&s.cycles>=1&&s.backlog>0){syncEl.classList.add('on');syncTxt.textContent='Читаю историю · ещё '+s.backlog+' '+plural(s.backlog,'чат','чата','чатов')}
   else syncEl.classList.remove('on');
 }
+const syncBusy=s=>!!(s&&(s.running||(s.cycles>=1&&s.backlog>0)));
 function render(){
   const my=++token;clearTimeout(pollTimer);
   const v=cur.view,rootView=(v==='chats'||v==='people');
@@ -269,7 +271,7 @@ async function loadChats(my){
   try{
     const d=await apiRetry('/api/chats',my);if(my!==token)return;
     chats=d.items||[];totals=d.totals||totals;syncInfo=d.sync;renderSync(d.sync);renderChats();
-    if(d.sync&&d.sync.running)pollTimer=setTimeout(()=>{if(my===token)loadChats(my)},8000);
+    if(syncBusy(d.sync))pollTimer=setTimeout(()=>{if(my===token)loadChats(my)},8000);
   }catch(e){if(my===token&&!chats.length)showState(e.message)}
 }
 function chatRow(c){
@@ -348,7 +350,7 @@ async function loadPeople(my){
   try{
     const d=await apiRetry('/api/people',my);if(my!==token)return;
     people=d.items||[];totals=d.totals||totals;renderSync(d.sync);renderPeople();
-    if((d.sync&&d.sync.running)||people.some(p=>p.messages>=15&&!p.analyzed_at&&d.llm))pollTimer=setTimeout(()=>{if(my===token)loadPeople(my)},12000);
+    if(syncBusy(d.sync)||people.some(p=>p.messages>=15&&!p.analyzed_at&&d.llm))pollTimer=setTimeout(()=>{if(my===token)loadPeople(my)},12000);
   }catch(e){if(my===token&&!people.length)showState(e.message)}
 }
 const isHostile=p=>p.attitude==='враждебное'||(p.hostility||0)>=60;
@@ -445,7 +447,12 @@ function renderPerson(d){
 
   /* analysis state */
   const total=st.total||0;
-  if(d.analyzing){content.append(card('Анализ',h('p','',''),h('span','spin'),' Анализирую переписку… обычно 10–40 секунд.'))}
+  if(a&&a.coverage){const cv=a.coverage;content.append(h('div','note','Прочитано: '+num(cv.messages)+' '+plural(cv.messages,'сообщение','сообщения','сообщений')+' · '+cv.fragments+' '+plural(cv.fragments,'фрагмент','фрагмента','фрагментов')+' · '+fmtDay(cv.first)+' — '+fmtDay(cv.last)))}
+  if(d.analyzing){
+    const pr=d.progress;
+    const msg=pr?(pr.stage==='synthesis'?'Собираю итоговый профиль по всей истории…':'Читаю историю: '+pr.done+' из '+pr.total+' фрагментов. Идёт в фоне, можно закрыть панель.'):'Запускаю анализ…';
+    content.append(card('Глубокое чтение',h('span','spin'),' '+msg));
+  }
   else if(!a){
     const c=card('Профиль');
     if(d.analysis_error)c.append(h('p','',d.analysis_error.startsWith('RuntimeError: Слишком')?'Слишком мало сообщений для анализа.':'Последняя попытка не удалась: '+d.analysis_error));
@@ -469,6 +476,18 @@ function renderPerson(d){
     if(a.traits.length){who.append(h('p','',h('b','','Черты')));who.append(chipsOf(a.traits))}
     if(a.communication_style)who.append(h('p','',h('b','','Стиль общения: '),a.communication_style));
     content.append(who);
+    if(a.background||(a.timeline||[]).length){
+      const c=card('Путь и история');if(a.background)c.append(h('p','',a.background));
+      (a.timeline||[]).forEach(t=>c.append(h('p','',h('b','',t.period+': '),t.event)));content.append(c);
+    }
+    const sk=a.skills||[],gp=a.goals_plans||[],mo=a.motivations||[];
+    if(sk.length||gp.length||mo.length){
+      const c=card('Навыки, цели, мотивация');
+      if(sk.length){c.append(h('p','',h('b','','Навыки')));c.append(chipsOf(sk))}
+      if(gp.length){c.append(h('p','',h('b','','Цели и планы')));gp.forEach(x=>c.append(h('p','','• '+x)))}
+      if(mo.length){c.append(h('p','',h('b','','Что им движет')));mo.forEach(x=>c.append(h('p','','• '+x)))}
+      content.append(c);
+    }
 
     if(a.notable_facts.length){
       const c=card('Что человек сам о себе сообщал');
@@ -478,6 +497,7 @@ function renderPerson(d){
     const rel=card('Отношение к вам');
     if(att.explanation)rel.append(h('p','',att.explanation));
     quotes(att.evidence).forEach(q=>rel.append(q));
+    if(a.attitude_history)rel.append(h('p','',h('b','','Как менялось: '),a.attitude_history));
     if(!att.explanation&&!att.evidence.length)rel.append(h('p','','Прямых взаимодействий пока мало.'));
     content.append(rel);
 
@@ -486,6 +506,12 @@ function renderPerson(d){
     if(use.reasons.length){us.append(h('p','',h('b','','Почему')));use.reasons.forEach(r=>us.append(h('p','','• '+r)))}
     if(use.how_to_use.length){us.append(h('p','',h('b','','Как взаимодействовать')));use.how_to_use.forEach(r=>us.append(h('p','','• '+r)))}
     content.append(us);
+    const rm=a.relationships_mentioned||[];
+    if(rm.length){const c=card('Кого упоминает');rm.forEach(r=>c.append(h('p','',h('b','',r.who+': '),r.relation)));content.append(c)}
+    const ot=a.open_threads||[];
+    if(ot.length){const c=card('Незакрытое между вами');ot.forEach(x=>c.append(h('p','','• '+x)));content.append(c)}
+    const ap=a.how_to_approach||[];
+    if(ap.length){const c=card('Как лучше взаимодействовать');ap.forEach(x=>c.append(h('p','','• '+x)));content.append(c)}
 
     if(a.recent_topics.length||a.recent_changes){
       const c=card('Недавно');
