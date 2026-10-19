@@ -1,3 +1,9 @@
+"""Database persistence for hosts with an ephemeral disk (Render free tier).
+
+The SQLite file is snapshotted (consistent, via the sqlite3 backup API), gzipped and sent to the
+account's own "Saved Messages" as a document tagged with TAG. On a fresh start (empty/missing
+database) the newest snapshot is downloaded and installed before anything else runs.
+"""
 import asyncio
 import gzip
 import os
@@ -128,9 +134,15 @@ async def backup_now(client, path: str, force: bool = False) -> bool:
         workdir = tempfile.mkdtemp(prefix="wm-backup-")
         try:
             gz = await asyncio.to_thread(_snapshot_gz, path, workdir)
+            size = os.path.getsize(gz)
+            if size > settings.backup_max_mb * 1024 * 1024:
+                print(f"Резервная копия {size // 1048576} МБ больше лимита BACKUP_MAX_MB={settings.backup_max_mb} — пропускаю.")
+                _state["mtime"] = mtime
+                return False
             await client.send_file("me", gz, caption=f"{TAG} {datetime.now(timezone.utc).isoformat()}",
                                    force_document=True)
             _state["mtime"] = mtime
+            _state["size"] = size
             try:
                 for old in (await _find_backups(client))[KEEP:]:
                     await old.delete()
@@ -150,7 +162,9 @@ async def backup_loop(client, path: str):
     await asyncio.sleep(120)
     while True:
         try:
-            await asyncio.wait_for(WAKE.wait(), timeout=max(1, settings.backup_interval_min) * 60)
+            # a big database is uploaded less often (every upload is the whole file)
+            factor = 4 if _state.get("size", 0) > 40 * 1048576 else 1
+            await asyncio.wait_for(WAKE.wait(), timeout=max(1, settings.backup_interval_min) * 60 * factor)
             await asyncio.sleep(15)  # collect a burst of changes into one upload
         except asyncio.TimeoutError:
             pass
