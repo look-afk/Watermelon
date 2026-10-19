@@ -1,61 +1,86 @@
-# Watermelon
+# Watermelon — бот-аналитик для Telegram
 
-Watermelon combines a Telegram userbot (Telethon, running as your Telegram account) with a separate BotFather bot (aiogram) and a Telegram Web App panel. The userbot silently imports text history of your chats in the background, stores new messages live, and the panel shows chats, members and messages. The bot can analyze stored messages with an LLM.
+Userbot (Telethon, работает от вашего аккаунта) автоматически читает ваши чаты и контакты, а Web App панель
+(открывается из BotFather-бота командой `/panel`) показывает аналитику.
 
-## Privacy and security
+## Что умеет
 
-- Never publish `TG_SESSION`, `TG_API_HASH`, `LLM_API_KEY`, or `BOT_TOKEN`. The session string grants access to your Telegram account.
-- Create the userbot session on your own computer and add it to Render only through **Environment**.
-- The panel is available only to the account behind `TG_SESSION` (plus IDs in `PANEL_ALLOWED_USER_IDS`).
-- Only text messages and text captions are stored; broadcast channels are not synced.
-- Use this only with chats where you have permission to process the messages.
-- Model output may be inaccurate and should not be treated as a diagnosis or definitive judgment about a person.
+- **Вкладка «Чаты»** — только группы (без контактов и каналов). Внутри чата — все участники; тап по участнику открывает профиль.
+- **Вкладка «Люди»** — все люди вместе, без разбивки по чатам: поиск, фильтры (контакты, враждебные, полезные, скрытые), сортировка.
+- **Профиль человека** — кто он, чем занимается, отношение к вам (враждебность), полезность для вас, токсичность, интересы,
+  стиль общения, статистика (активность по часам/неделям, скорость ответов, динамика), **связи** (с кем общается, близкий круг),
+  чаты, **недавняя активность**. Профиль обновляется автоматически по мере новых сообщений.
+- **Кнопка ⊘ у чата** — исключить чат из анализа: сообщения не собираются, участники не анализируются, ранее сохранённое удаляется.
+- **В профиле** — «Не анализировать этого человека» или «Следить, даже если чат исключён» (собираются только его сообщения).
 
-## 1. Telegram API credentials and session
+## Приватность и безопасность
 
-1. Open https://my.telegram.org and sign in.
-2. Open **API development tools** and get `api_id` and `api_hash`.
-3. Install Python 3.12+ and dependencies locally, then create a session:
+- Никогда не публикуйте `TG_SESSION`, `TG_API_HASH`, `LLM_API_KEY`, `BOT_TOKEN`. Строка сессии даёт доступ к вашему аккаунту.
+- Панель доступна только аккаунту из `TG_SESSION` (плюс ID из `PANEL_ALLOWED_USER_IDS`).
+- Хранятся только текстовые сообщения. Каналы не синхронизируются.
+- Анализ — это гипотезы модели по переписке, а не факты. Модель не делает выводов о здоровье, ориентации, религии и т. п.
+- Анализируйте только переписки, в которых вы участвуете и имеете право их обрабатывать. Тексты сообщений отправляются LLM-провайдеру.
 
+## Установка
+
+1. Получите `api_id` и `api_hash` на https://my.telegram.org.
+2. Создайте сессию локально (не запускайте бота локально с этой же сессией, пока он работает на Render):
 ```bash
 pip install -r requirements.txt
 python -m app.create_session
 ```
+3. Render Web Service — Build: `pip install -r requirements.txt`, Start: `python -m app.web`.
 
-Keep the generated session string private. Do not run the bot locally with the same session while it runs on Render.
+## Переменные окружения
 
-## 2. Render Web Service
+`BOT_TOKEN`, `TG_API_ID`, `TG_API_HASH`, `TG_SESSION`, `LLM_API_KEY` (обязательные), `LLM_BASE_URL`, `LLM_MODEL`,
+`DATABASE_PATH`, `MAX_MESSAGES_PER_ANALYSIS`, `AUTO_SYNC_DIALOGS` и `AUTO_SYNC_MESSAGES_PER_CHAT` (0 = без лимита), `AUTO_SYNC_CHUNK`, `AUTO_SYNC_INTERVAL_MIN`,
+`PROFILE_CHUNKS_PER_CYCLE`, `PROFILE_CALL_PAUSE_SEC`, `PROFILE_WAIT_BACKFILL_HOURS`, `LLM_NOTES_MODEL`, `BACKUP_MAX_MB`,
+`PROFILE_AUTO`, `PROFILE_MIN_MESSAGES` (с какого числа сообщений строить профиль, по умолчанию 15),
+`PROFILE_REFRESH_MESSAGES` (после скольких новых сообщений обновлять, 25), `PROFILE_MAX_PER_CYCLE` (профилей за цикл, 6),
+`PROFILE_INTERVAL_MIN` (период цикла, 10), `PANEL_URL`, `PANEL_ALLOWED_USER_IDS`.
 
-**Build Command**
-```bash
-pip install -r requirements.txt
+## Как это работает
+
+- **Читается всё.** Бот загружает ВСЮ историю всех ваших чатов (не только последние сообщения): сначала новое, затем
+  старое от свежего к древнему. Загрузка возобновляемая: после перезапуска или деплоя она продолжается с того места, где
+  остановилась. Новые сообщения сохраняются сразу. Первая загрузка большого аккаунта может идти часами — это нормально.
+- **Глубокое чтение людей.** Вся переписка человека режется на фрагменты (по времени и размеру) вместе с ближайшими
+  репликами владельца. Каждый фрагмент читается один раз и превращается в заметки (факты, события, тон, отношение к вам,
+  навыки, упоминания, планы, цитаты). Заметки сохраняются, поэтому работа возобновляется и не повторяется. Затем итоговый
+  профиль строится по ВСЕМ заметкам и свежим сообщениям; для очень длинных историй старые годы сжимаются в сводки.
+  После новых сообщений перечитываются только изменившиеся фрагменты.
+- **Расход LLM.** Один вызов на фрагмент (~10 000 знаков) + один на профиль. Человек на 20 000 сообщений ≈ 70–90 вызовов.
+  Бесплатные лимиты Gemini ограничены, поэтому чтение идёт порциями (`PROFILE_CHUNKS_PER_CYCLE`, `PROFILE_CALL_PAUSE_SEC`);
+  для экономии укажите дешёвую модель в `LLM_NOTES_MODEL`. Кнопка «Обновить анализ сейчас» в профиле читает человека целиком.
+- Связи считаются без LLM: быстрые ответы друг другу, реплаи, @упоминания, общие чаты.
+- Читаются только текстовые сообщения и подписи: голосовые, фото и видео не анализируются.
+- **Хранение без диска (Render Free).** Диск на бесплатном Render стирается при каждом деплое и пробуждении, поэтому бот
+  сам сохраняет снимок базы в ваше «Избранное» Telegram (файл `watermelon-….db.gz`, хранятся 2 последних) и при старте
+  автоматически восстанавливает её оттуда. Снимок делается раз в `BACKUP_INTERVAL_MIN` минут при изменениях,
+  сразу после смены исключений и при остановке сервиса. Отключить: `BACKUP_TO_TELEGRAM=0`. Снимок содержит собранные
+  тексты — храните «Избранное» так же бережно, как сам аккаунт.
+- **Засыпание.** Бесплатный Render усыпляет сервис после 15 минут без запросов, и тогда бот ничего не собирает.
+  Чтобы он не засыпал, подключите UptimeRobot (см. ниже).
+- Health endpoint: `/health` (без авторизации, отвечает на GET и HEAD).
+
+## Подключение UptimeRobot (чтобы сервис не засыпал)
+
+1. Откройте https://uptimerobot.com и войдите (бесплатного тарифа достаточно).
+2. **Add New Monitor** → тип **HTTP(s)**.
+3. **Friendly Name**: `Watermelon`. **URL**: `https://ВАШ-СЕРВИС.onrender.com/health`
+   (адрес — в Render, вверху страницы сервиса). **Monitoring Interval**: 5 минут.
+4. Сохраните. Монитор должен стать зелёным (Up). Первый ответ после сна может идти до минуты — это нормально.
+
+Необязательно — мониторинг самого Telegram-аккаунта: выберите тип **Keyword**, URL тот же, **Keyword**: `connected`,
+**Alert when**: keyword does not exist. Тогда придёт уведомление, если userbot отключился (например, сессия отозвана),
+хотя сервер жив. Ответ `/health` выглядит так:
+
+```json
+{"status": "ok", "service": "watermelon", "userbot": "connected"}
 ```
 
-**Start Command**
-```bash
-python -m app.web
-```
+Пока userbot подключается (после деплоя), `userbot` равен `connecting`, а HTTP-код остаётся 200.
+Дополнительно можно указать `/health` в Render → Settings → Health Check Path.
 
-## 3. Environment variables
-
-- `BOT_TOKEN` — token of the BotFather bot.
-- `TG_API_ID`, `TG_API_HASH`, `TG_SESSION` — userbot credentials.
-- `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` — LLM endpoint (defaults to Gemini).
-- `DATABASE_PATH` — defaults to `messages.db`.
-- `MAX_MESSAGES_PER_ANALYSIS` — defaults to `100`.
-- `AUTO_SYNC_DIALOGS` — most recent chats to sync, default `150`.
-- `AUTO_SYNC_MESSAGES_PER_CHAT` — first-time history depth per chat, default `2000`.
-- `AUTO_SYNC_INTERVAL_MIN` — how often missed messages are checked, default `30`.
-- `PANEL_URL` — public HTTPS URL of `/panel` (optional on Render).
-- `PANEL_ALLOWED_USER_IDS` — extra Telegram IDs allowed in the panel (optional).
-
-## 4. Usage
-
-1. Start the service. History of your chats is imported automatically in the background (a small indicator in the panel shows progress). New messages are stored live.
-2. Send `/panel` to the bot and open the panel: chats with photos and last activity, members with message statistics, and a searchable message feed.
-3. Optional analysis: `/analyze USER_ID` in the bot, or `.analyze USER_ID`, `.analyzeall USER_ID` from your account.
-
-## 5. Health check and storage
-
-- Health endpoint: `/health`.
-- Render's local filesystem may not persist across redeploys; after a redeploy the history is simply re-imported automatically. For durable storage configure a persistent disk or an external database.
+Бесплатный Render даёт 750 часов в месяц на аккаунт: одного сервиса, работающего 24/7, хватает (≈744 ч).
