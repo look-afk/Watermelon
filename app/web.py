@@ -1,15 +1,17 @@
 """Run the Telegram bot, personal-account client, and authenticated Web App."""
 import asyncio
+import logging
 import os
 import signal
 
 from aiohttp import web
 
 from . import backup
+from .diagnostics import install_error_capture
 from .config import settings
 from .main import main as bot_main
-from .panel import create_app
-from .userbot import main as userbot_main
+from ..panel import create_app
+from ..userbot import main as userbot_main
 
 
 async def run_http_server():
@@ -26,6 +28,8 @@ async def run_http_server():
 
 
 async def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    install_error_capture()  # feeds the "last errors" list of /diag
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):

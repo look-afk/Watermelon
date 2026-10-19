@@ -1,4 +1,5 @@
 import asyncio
+#"у"
 import html
 import json
 import os
@@ -27,8 +28,17 @@ SYNC_WAKE = asyncio.Event()
 CMD_RE = re.compile(r"^\.(analyze|analyzeall|helpwatermelon)\b")
 
 
+# Owner id is remembered as soon as the account is authorized, so the bot recognizes the owner even while
+# the database is being restored or Telethon briefly reconnects (otherwise every command was "access denied").
+OWNER = {"id": None}
+
+
 def get_client():
     return _client
+
+
+def get_owner_id():
+    return OWNER["id"]
 
 
 def required_env(name: str) -> str:
@@ -190,7 +200,10 @@ async def refresh_contacts(client, storage: Storage):
 async def auto_sync_loop(client, storage: Storage):
     await asyncio.sleep(3)
     me = await client.get_me()
-    while client.is_connected():
+    while True:
+        if not client.is_connected():
+            await asyncio.sleep(5)  # Telethon reconnects by itself; keep waiting instead of quitting for good
+            continue
         backlog = 0
         try:
             await refresh_contacts(client, storage)
@@ -270,7 +283,8 @@ async def main():
             sender_id = getattr(sender, "id", None)
             if sender_id is None or not storage.should_store(event.chat_id, sender_id):
                 return
-            storage.save_message(
+            await asyncio.to_thread(
+                storage.save_message,
                 chat_id=event.chat_id,
                 user_id=sender_id,
                 username=getattr(sender, "username", None),
@@ -360,13 +374,15 @@ async def main():
             "Останови второй процесс и создай новую сессию: python -m app.create_session"
         ) from exc
 
+    me = await client.get_me()
+    OWNER["id"] = me.id
+
     # No persistent disk on Render free: bring the database back from the latest Saved-Messages snapshot
     # BEFORE the panel is unlocked and before any sync runs.
     if settings.backup_enabled:
         await backup.restore_if_fresh(client, settings.database_path)
 
     _client = client
-    me = await client.get_me()
     print(f"Watermelon запущен для аккаунта ID {me.id}. Автосинхронизация и анализ профилей включены.")
     tasks = [asyncio.create_task(auto_sync_loop(client, storage))]
     if settings.backup_enabled:

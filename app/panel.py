@@ -21,6 +21,20 @@ _storage = None
 _tasks: set = set()
 
 
+_cache: dict = {}
+
+
+async def cached(key: str, ttl: float, fn, *args):
+    """Run a heavy DB read in a thread and reuse the result for a few seconds (the panel polls while syncing)."""
+    hit = _cache.get(key)
+    now = time.time()
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    value = await asyncio.to_thread(fn, *args)
+    _cache[key] = (now, value)
+    return value
+
+
 def storage() -> Storage:
     global _storage
     if _storage is None:
@@ -178,7 +192,8 @@ async def chats(request):
         raise json_error(502, f"Не удалось загрузить диалоги Telegram ({type(exc).__name__}). Проверь логи Render.") from exc
 
     st = storage()
-    counts = st.get_chat_counts()
+    counts = await cached("counts", 8, st.get_chat_counts)
+    totals = await cached("totals", 8, st.get_totals)
     excluded = st.get_excluded_chats()
     items = []
     for d in dialogs:
@@ -200,7 +215,7 @@ async def chats(request):
         })
     return web.json_response({
         "items": items,
-        "totals": st.get_totals(),
+        "totals": totals,
         "sync": get_sync_state(),
         "me": {"id": me.id, "name": full_name(me)},
         "llm": bool(settings.llm_api_key and settings.profile_auto),
@@ -305,6 +320,7 @@ async def chat_rule(request):
     purged = await asyncio.to_thread(storage().set_chat_excluded, chat_id, bool(body["excluded"]))
     wake_sync()
     request_backup()
+    _cache.clear()
     return web.json_response({"excluded": bool(body["excluded"]), "purged": purged})
 
 
@@ -312,7 +328,9 @@ async def people(request):
     """Tab «Люди»: everybody, without chat grouping."""
     client, me = await authorize(request)
     st = storage()
-    rows, headlines = await asyncio.gather(asyncio.to_thread(st.get_people_list), asyncio.to_thread(st.get_headlines))
+    rows = await cached("people", 8, st.get_people_list)
+    headlines = await cached("headlines", 8, st.get_headlines)
+    totals = await cached("totals", 8, st.get_totals)
     items = []
     for r in rows:
         if r["id"] == me.id:
@@ -324,7 +342,7 @@ async def people(request):
             **headline_fields(headlines.get(r["id"])),
         })
     items.sort(key=lambda x: (-x["messages"], x["title"].lower()))
-    return web.json_response({"items": items[:2000], "totals": st.get_totals(), "sync": get_sync_state(),
+    return web.json_response({"items": items[:2000], "totals": totals, "sync": get_sync_state(),
                               "llm": bool(settings.llm_api_key and settings.profile_auto)})
 
 
@@ -416,6 +434,7 @@ async def person_rule(request):
     purged = await asyncio.to_thread(storage().set_person_rule, uid, ignored, tracked)
     wake_sync()
     request_backup()
+    _cache.clear()
     return web.json_response({"rules": storage().get_person_rule(uid), "purged": purged})
 
 

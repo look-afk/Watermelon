@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -17,15 +18,21 @@ from .ai_providers import PRESETS, add_provider, analyze_with_provider, get_prov
 from .diagnostics import recent_errors, uptime_seconds
 from .config import settings, validate_settings
 from .storage import Storage
-from .userbot import SYNC_STATE, SYNC_WAKE, get_client
+from .userbot import SYNC_STATE, SYNC_WAKE, get_client, get_owner_id
 
 
 dp = Dispatcher()
 storage = Storage(settings.database_path)
 AI_SETUP = {}
+SYNC_WATCHERS = set()
 
 
 async def is_owner_id(user_id: int) -> bool:
+    # The owner id is remembered the moment the account is authorized, so the bot keeps recognizing
+    # the owner while the database is restored or Telethon reconnects.
+    owner = get_owner_id()
+    if owner is not None:
+        return user_id == owner
     client = get_client()
     if not client or not client.is_connected():
         return False
@@ -41,6 +48,9 @@ async def ensure_owner(message: Message) -> bool:
         return False
     if await is_owner_id(message.from_user.id):
         return True
+    if get_owner_id() is None:
+        await message.answer("Личный аккаунт Telegram ещё подключается (идёт запуск или восстановление базы). Повтори через минуту.")
+        return False
     await message.answer("Доступ закрыт: Watermelon предназначен только для владельца подключённого Telegram-аккаунта.")
     return False
 
@@ -65,6 +75,7 @@ async def diagnostics_command(message: Message):
         "Telegram Bot: процесс запущен; polling проверяется по журналу ошибок",
         f"Telethon: {'подключён' if connected else 'НЕ подключён'}",
         f"Синхронизация: {'идёт' if state.get('running') else 'ожидает'}; чаты {state.get('done', 0)}/{state.get('total', 0)}; сейчас: {state.get('current_chat') or '—'}",
+        f"Чатов с недогруженной историей: {state.get('backlog', 0)}; проходов: {state.get('cycles', 0)}",
         f"Резервная копия: {'включена' if settings.backup_enabled else 'выключена'}",
         f"Основной ИИ: {settings.llm_model if settings.llm_api_key else 'не настроен'}",
         f"Дополнительные ИИ: {len(providers)}",
@@ -247,44 +258,44 @@ async def open_panel(message: Message):
 
 @dp.message(Command("sync"))
 async def sync_chats(message: Message):
-    if message.chat.type != "private" or not message.from_user:
-        await message.answer("Используй /sync в личном чате с ботом.")
+    if not await ensure_owner(message):
         return
-
     client = get_client()
     if not client or not client.is_connected():
         await message.answer("Личный аккаунт Telegram ещё подключается. Попробуй позже.")
         return
 
-    me = await client.get_me()
-    if message.from_user.id != me.id:
-        await message.answer("Команда доступна только владельцу подключённого Telegram-аккаунта.")
-        return
-
-    if SYNC_STATE.get("running"):
+    user_id = message.from_user.id
+    if user_id in SYNC_WATCHERS or SYNC_STATE.get("running"):
         await message.answer(format_sync_status(SYNC_STATE, prefix="Синхронизация уже идёт."))
         return
 
     before_cycles = SYNC_STATE.get("cycles", 0)
     SYNC_WAKE.set()
     status_message = await message.answer("Запускаю синхронизацию чатов в фоне…")
+    SYNC_WATCHERS.add(user_id)
     last_text = ""
+    deadline = time.monotonic() + 20 * 60  # watch for at most 20 minutes; the sync itself keeps running
     try:
         while True:
             state = dict(SYNC_STATE)
-            text = format_sync_status(state, prefix="Синхронизация запущена.")
+            finished = state.get("cycles", 0) > before_cycles and not state.get("running") and state.get("backlog", 0) == 0
+            timed_out = time.monotonic() > deadline
+            prefix = ("Синхронизация истории завершена." if finished else
+                      "Синхронизация продолжается в фоне (наблюдение остановлено, смотри /diag или панель)." if timed_out else
+                      "Синхронизация запущена.")
+            text = format_sync_status(state, prefix=prefix)
             if text != last_text:
                 try:
                     await status_message.edit_text(text)
                     last_text = text
                 except Exception:
                     pass
-            if state.get("cycles", 0) > before_cycles and not state.get("running") and state.get("backlog", 0) == 0:
-                await status_message.edit_text(format_sync_status(state, prefix="Синхронизация истории завершена."))
+            if finished or timed_out:
                 return
             await asyncio.sleep(5)
-    except asyncio.CancelledError:
-        raise
+    finally:
+        SYNC_WATCHERS.discard(user_id)
 
 
 def format_sync_status(state: dict, prefix: str = "Состояние синхронизации.") -> str:
@@ -324,9 +335,9 @@ async def analyze(message: Message):
         return
 
     if chat_id is None:
-        messages = storage.get_messages_all(target_id, settings.max_messages_per_analysis)
+        messages = await asyncio.to_thread(storage.get_messages_all, target_id, settings.max_messages_per_analysis)
     else:
-        messages = storage.get_messages(chat_id, target_id, settings.max_messages_per_analysis)
+        messages = await asyncio.to_thread(storage.get_messages, chat_id, target_id, settings.max_messages_per_analysis)
 
     if len(messages) < 2:
         await message.answer(
@@ -365,7 +376,8 @@ async def collect(message: Message):
         return
     if not storage.should_store(message.chat.id, message.from_user.id):
         return  # excluded chat or ignored person
-    storage.save_message(
+    await asyncio.to_thread(
+        storage.save_message,
         chat_id=message.chat.id,
         user_id=message.from_user.id,
         username=message.from_user.username,

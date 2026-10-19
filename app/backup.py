@@ -16,10 +16,21 @@ from .config import settings
 from .storage import Storage
 
 TAG = "#watermelon_db_backup"
-KEEP = 2
+KEEP = 6  # keep several snapshots: a bad (e.g. empty) one must never be able to replace the good ones
 WAKE = asyncio.Event()
 _lock = asyncio.Lock()
 _state = {"client": None, "mtime": 0}
+
+
+def _mtime(path: str) -> int:
+    """Latest modification of the database INCLUDING its WAL (in WAL mode writes land there first)."""
+    times = []
+    for candidate in (path, path + "-wal"):
+        try:
+            times.append(os.stat(candidate).st_mtime_ns)
+        except OSError:
+            pass
+    return max(times) if times else 0
 
 
 def request_backup():
@@ -87,11 +98,14 @@ def _install(gz_path: str, path: str) -> bool:
 
 
 async def _find_backups(client) -> list:
-    found = []
-    async for message in client.iter_messages("me", search=TAG, limit=30):
+    def is_backup(message) -> bool:
         name = (message.file.name if message.file else "") or ""
-        if message.file and name.endswith(".db.gz"):
-            found.append(message)
+        return bool(message.file) and name.startswith("watermelon-") and name.endswith(".db.gz")
+
+    found = [m async for m in client.iter_messages("me", search=TAG, limit=30) if is_backup(m)]
+    if not found:
+        # Telegram's text search can lag behind or skip hashtags: fall back to scanning recent Saved Messages.
+        found = [m async for m in client.iter_messages("me", limit=300) if is_backup(m)]
     return found  # newest first
 
 
@@ -113,7 +127,7 @@ async def restore_if_fresh(client, path: str) -> bool:
             await client.download_media(message, file=gz)
             if await asyncio.to_thread(_install, gz, path):
                 Storage(path).reload()
-                _state["mtime"] = os.stat(path).st_mtime_ns
+                _state["mtime"] = _mtime(path)
                 print(f"База восстановлена из резервной копии от {message.date:%Y-%m-%d %H:%M} UTC.")
                 return True
             print("Резервная копия повреждена, пробую предыдущую…")
@@ -128,7 +142,9 @@ async def backup_now(client, path: str, force: bool = False) -> bool:
     async with _lock:
         if not os.path.exists(path):
             return False
-        mtime = os.stat(path).st_mtime_ns
+        if await asyncio.to_thread(_is_fresh, path):
+            return False  # never upload an empty database: it could shadow a real backup
+        mtime = _mtime(path)
         if not force and mtime == _state["mtime"]:
             return False  # nothing changed since the last upload
         workdir = tempfile.mkdtemp(prefix="wm-backup-")
@@ -159,7 +175,8 @@ async def backup_now(client, path: str, force: bool = False) -> bool:
 
 async def backup_loop(client, path: str):
     _state["client"] = client
-    await asyncio.sleep(120)
+    await asyncio.sleep(90)
+    await backup_now(client, path)  # first snapshot soon: a restart must not lose the first minutes of work
     while True:
         try:
             # a big database is uploaded less often (every upload is the whole file)

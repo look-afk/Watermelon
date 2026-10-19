@@ -50,6 +50,10 @@ class Storage:
         if str(parent) not in ("", "."):
             parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as con:
+            # WAL: the periodic backup snapshot and the panel's heavy reads must not block the writers.
+            # In the default rollback-journal mode a long read (the snapshot) froze every write, the event
+            # loop waited on the lock, Telegram/aiogram/HTTP stalled and Render killed the process.
+            con.execute("PRAGMA journal_mode=WAL")
             con.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,6 +117,8 @@ class Storage:
     def _connect(self):
         con = sqlite3.connect(self.path, timeout=30)
         try:
+            con.execute("PRAGMA busy_timeout=30000")
+            con.execute("PRAGMA synchronous=NORMAL")
             with con:
                 yield con
         finally:

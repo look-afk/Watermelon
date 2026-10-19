@@ -8,8 +8,8 @@ _STARTED = time.time()
 _EVENTS = deque(maxlen=20)
 _INSTALLED = False
 _SECRET_PATTERNS = [
-    (re.compile(r"(?i)(bearer\\s+)[A-Za-z0-9._-]+"), r"\\1[REDACTED]"),
-    (re.compile(r"\\b\d{8,10}:[A-Za-z0-9_-]{30,}\\b"), "[BOT_TOKEN_REDACTED]"),
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._-]+"), r"\1[REDACTED]"),
+    (re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{30,}\b"), "[BOT_TOKEN_REDACTED]"),
 ]
 
 
