@@ -19,7 +19,7 @@ from .storage import Storage
 _client = None
 
 # Read by the panel to show a small sync indicator.
-SYNC_STATE = {"running": False, "done": 0, "total": 0, "new_messages": 0}
+SYNC_STATE = {"running": False, "done": 0, "total": 0, "new_messages": 0, "backlog": 1, "cycles": 0}
 # Set by the panel after a rule change so the next sync cycle starts right away.
 SYNC_WAKE = asyncio.Event()
 
@@ -72,52 +72,106 @@ def reply_id(message) -> int | None:
     return getattr(getattr(message, "reply_to", None), "reply_to_msg_id", None)
 
 
-async def sync_chunk(client, storage: Storage, chat_id: int, me, limit: int, from_user: int | None = None) -> int:
-    """Silently import text history. First run = backfill up to `limit`; later runs only newer messages.
-    The marker is kept per (chat, user) so a tracked person's sync in an excluded chat is independent."""
+def history_complete() -> bool:
+    """True once at least one full cycle ran and no chat still has an unfinished history import."""
+    return SYNC_STATE["cycles"] >= 1 and SYNC_STATE["backlog"] == 0
+
+
+async def sync_chunk(client, storage: Storage, chat_id: int, me, from_user: int | None = None) -> tuple[int, bool]:
+    """Silently import the text history of one chat, ALL of it.
+      1. messages newer than the stored marker (cheap, every cycle);
+      2. the backfill of older history, resumable: it walks from the newest message towards the oldest and
+         remembers how far it got, so a restart or redeploy continues instead of starting over.
+    A per-cycle cap (AUTO_SYNC_CHUNK) keeps one huge chat from starving the others.
+    Returns (new messages saved, backfill still pending)."""
     key = from_user or 0
-    marker = await asyncio.to_thread(storage.get_sync_marker, chat_id, key)
-    kwargs = {"limit": limit}
-    if marker:
-        kwargs["min_id"] = marker
-    if from_user:
-        kwargs["from_user"] = from_user
-    rows = []
-    max_id = marker or 0
-    async for message in client.iter_messages(chat_id, **kwargs):
-        max_id = max(max_id, message.id)
+    state = await asyncio.to_thread(storage.get_sync_state, chat_id, key)
+    saved_total = 0
+    base = {"from_user": from_user} if from_user else {}
+
+    def make_row(message):
         text = (message.message or "").strip()
         sender_id = message.sender_id
         if not text or not sender_id or CMD_RE.match(text):
-            continue
+            return None
         if not storage.should_store(chat_id, sender_id):
-            continue
+            return None
         sender = me if message.out else message.sender
         if sender is not None and getattr(sender, "bot", False):
-            continue
-        rows.append((
-            chat_id, sender_id, getattr(sender, "username", None), display_name(sender), text, message.id,
-            message.date.isoformat() if message.date else None, reply_id(message),
-        ))
-    saved = await asyncio.to_thread(storage.save_messages_bulk, rows)
-    await asyncio.to_thread(storage.set_sync_marker, chat_id, max_id, key)
-    return saved
+            return None
+        return (chat_id, sender_id, getattr(sender, "username", None), display_name(sender), text, message.id,
+                message.date.isoformat() if message.date else None, reply_id(message))
+
+    async def flush(rows):
+        nonlocal saved_total
+        if rows:
+            saved_total += await asyncio.to_thread(storage.save_messages_bulk, rows)
+            rows.clear()
+
+    # 1) what is new since the last run
+    if state and state["max_id"]:
+        rows, newest = [], state["max_id"]
+        async for message in client.iter_messages(chat_id, limit=None, min_id=state["max_id"], **base):
+            newest = max(newest, message.id)
+            row = make_row(message)
+            if row:
+                rows.append(row)
+            if len(rows) >= 1000:
+                await flush(rows)
+        await flush(rows)
+        await asyncio.to_thread(storage.set_sync_state, chat_id, key, max_id=newest)
+
+    # 2) the rest of the history, newest -> oldest
+    if state and state["bf_done"]:
+        return saved_total, False
+    first_pass_limit = settings.auto_sync_messages_per_chat or None  # 0 = unlimited
+    capped_first_pass = bool(first_pass_limit and not state)
+    cap = None if capped_first_pass else (settings.auto_sync_chunk or None)
+    offset = (state or {}).get("bf_min_id") or 0
+    rows, count, newest, oldest, finished = [], 0, 0, None, True
+    kwargs = dict(base)
+    if offset:
+        kwargs["offset_id"] = offset
+    if capped_first_pass:
+        kwargs["limit"] = first_pass_limit
+    else:
+        kwargs["limit"] = None
+    async for message in client.iter_messages(chat_id, **kwargs):
+        count += 1
+        newest = max(newest, message.id)
+        oldest = message.id if oldest is None else min(oldest, message.id)
+        row = make_row(message)
+        if row:
+            rows.append(row)
+        if len(rows) >= 1000:
+            await flush(rows)
+            await asyncio.to_thread(storage.set_sync_state, chat_id, key,
+                                    max_id=None if (state and state["max_id"]) else newest, bf_min_id=oldest)
+        if cap and count >= cap:
+            finished = False
+            break
+    await flush(rows)
+    await asyncio.to_thread(
+        storage.set_sync_state, chat_id, key,
+        max_id=None if (state and state["max_id"]) else newest, bf_min_id=oldest, bf_done=finished)
+    return saved_total, not finished
 
 
-async def sync_dialog(client, storage: Storage, dialog, me, limit: int) -> int:
+async def sync_dialog(client, storage: Storage, dialog, me) -> tuple[int, bool]:
     chat_id = dialog.id
     if storage.is_chat_excluded(chat_id):
         # The chat is not analyzed, except people explicitly marked as tracked.
-        saved = 0
+        saved, pending = 0, False
         for uid in storage.tracked_users()[:10]:
             try:
-                saved += await sync_chunk(client, storage, chat_id, me, limit, from_user=uid)
+                n, p = await sync_chunk(client, storage, chat_id, me, from_user=uid)
+                saved, pending = saved + n, pending or p
             except FloodWaitError:
                 raise
             except Exception:
                 pass  # the person is probably not in this chat
-        return saved
-    return await sync_chunk(client, storage, chat_id, me, limit)
+        return saved, pending
+    return await sync_chunk(client, storage, chat_id, me)
 
 
 async def refresh_contacts(client, storage: Storage):
@@ -137,9 +191,10 @@ async def auto_sync_loop(client, storage: Storage):
     await asyncio.sleep(3)
     me = await client.get_me()
     while client.is_connected():
+        backlog = 0
         try:
             await refresh_contacts(client, storage)
-            dialogs = [d async for d in client.iter_dialogs(limit=settings.auto_sync_dialogs)]
+            dialogs = [d async for d in client.iter_dialogs(limit=settings.auto_sync_dialogs or None)]
             for d in dialogs:  # chat/person directory used by the panel
                 entity = d.entity
                 await asyncio.to_thread(
@@ -148,27 +203,38 @@ async def auto_sync_loop(client, storage: Storage):
                     await asyncio.to_thread(storage.upsert_people, [(entity.id, display_name(entity), entity.username)])
             targets = [d for d in dialogs if is_syncable(d)]
             SYNC_STATE.update(running=True, done=0, total=len(targets), new_messages=0)
+            failed = 0
             for dialog in targets:
                 try:
-                    saved = await sync_dialog(client, storage, dialog, me, settings.auto_sync_messages_per_chat)
+                    saved, pending = await sync_dialog(client, storage, dialog, me)
                     SYNC_STATE["new_messages"] += saved
+                    backlog += 1 if pending else 0
                 except FloodWaitError as exc:
+                    backlog += 1
                     await asyncio.sleep(min(exc.seconds + 1, 900))
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    failed += 1
                     print(f"Автосинхронизация чата {dialog.id} не удалась: {type(exc).__name__}: {exc}")
                 SYNC_STATE["done"] += 1
-                await asyncio.sleep(0.4)
-            print(f"Автосинхронизация завершена: чатов {len(targets)}, новых сообщений {SYNC_STATE['new_messages']}")
+                SYNC_STATE["backlog"] = backlog
+                await asyncio.sleep(0.3)
+            SYNC_STATE["cycles"] += 1
+            print(f"Автосинхронизация: чатов {len(targets)}, новых сообщений {SYNC_STATE['new_messages']}, "
+                  f"чатов с недогруженной историей {backlog}, ошибок {failed}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            backlog = max(backlog, 1)
             print(f"Ошибка автосинхронизации: {type(exc).__name__}: {exc}")
         finally:
             SYNC_STATE["running"] = False
+            SYNC_STATE["backlog"] = backlog
+        # keep going quickly while some history is still being loaded, otherwise wait for the normal interval
+        wait = 20 if backlog else max(1, settings.auto_sync_interval_min) * 60
         try:
-            await asyncio.wait_for(SYNC_WAKE.wait(), timeout=max(1, settings.auto_sync_interval_min) * 60)
+            await asyncio.wait_for(SYNC_WAKE.wait(), timeout=wait)
         except asyncio.TimeoutError:
             pass
         SYNC_WAKE.clear()
@@ -215,7 +281,7 @@ async def main():
         except Exception as exc:
             print(f"Не удалось сохранить сообщение: {type(exc).__name__}: {exc}")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.analyze(?:\s+(\d+))?$") )
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.analyze(?:\s+(\d+))?$"))
     async def analyze_current_chat(event):
         try:
             target_text = event.pattern_match.group(1)
@@ -258,7 +324,7 @@ async def main():
             if len(rows) < 2:
                 await client.send_message(
                     event.chat_id,
-                    "Недостаточно сохранённых сообщений этого человека. Они подтяги��аются автоматически — смотри панель (/panel).")
+                    "Недостаточно сохранённых сообщений этого человека. Они подтягиваются автоматически — смотри панель (/panel).")
                 return
             await client.send_message(event.chat_id, f"Анализирую {len(rows)} сохранённых сообщений…")
             result = await asyncio.to_thread(analyze_messages, rows)
@@ -304,7 +370,7 @@ async def main():
     if settings.backup_enabled:
         tasks.append(asyncio.create_task(backup.backup_loop(client, settings.database_path)))
     if settings.profile_auto:
-        tasks.append(asyncio.create_task(profile_loop(storage, me.id, display_name(me) or "Владелец")))
+        tasks.append(asyncio.create_task(profile_loop(storage, me.id, display_name(me) or "Владелец", gate=history_complete)))
     try:
         await client.run_until_disconnected()
     finally:
