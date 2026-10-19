@@ -14,6 +14,7 @@ from aiogram.types import (
 from .analyzer import analyze_messages
 from .config import settings, validate_settings
 from .storage import Storage
+from .userbot import SYNC_STATE, SYNC_WAKE, get_client
 
 
 dp = Dispatcher()
@@ -26,6 +27,7 @@ async def start(message: Message):
         "Watermelon User Profiler\n"
         "Бот-аналитик: чаты читаются автоматически через ваш аккаунт.\n"
         "/panel — открыть панель: вкладки «Чаты» и «Люди», профили, связи, статистика.\n"
+        "/sync — запустить синхронизацию всех доступных чатов и смотреть прогресс.\n"
         "/analyze USER_ID — анализ сообщений пользователя из всех чатов.\n"
         "/analyze CHAT_ID USER_ID — анализ в одном чате."
     )
@@ -59,6 +61,64 @@ async def open_panel(message: Message):
         inline_keyboard=[[InlineKeyboardButton(text="Открыть Watermelon", web_app=WebAppInfo(url=panel_url))]]
     )
     await message.answer("Открой панель Watermelon кнопкой ниже.", reply_markup=keyboard)
+
+
+@dp.message(Command("sync"))
+async def sync_chats(message: Message):
+    if message.chat.type != "private" or not message.from_user:
+        await message.answer("Используй /sync в личном чате с ботом.")
+        return
+
+    client = get_client()
+    if not client or not client.is_connected():
+        await message.answer("Личный аккаунт Telegram ещё подключается. Попробуй позже.")
+        return
+
+    me = await client.get_me()
+    if message.from_user.id != me.id:
+        await message.answer("Команда доступна только владельцу подключённого Telegram-аккаунта.")
+        return
+
+    if SYNC_STATE.get("running"):
+        await message.answer(format_sync_status(SYNC_STATE, prefix="Синхронизация уже идёт."))
+        return
+
+    before_cycles = SYNC_STATE.get("cycles", 0)
+    SYNC_WAKE.set()
+    status_message = await message.answer("Запускаю синхронизацию чатов в фоне…")
+    last_text = ""
+    try:
+        while True:
+            state = dict(SYNC_STATE)
+            text = format_sync_status(state, prefix="Синхронизация запущена.")
+            if text != last_text:
+                try:
+                    await status_message.edit_text(text)
+                    last_text = text
+                except Exception:
+                    pass
+            if state.get("cycles", 0) > before_cycles and not state.get("running") and state.get("backlog", 0) == 0:
+                await status_message.edit_text(format_sync_status(state, prefix="Синхронизация истории завершена."))
+                return
+            await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        raise
+
+
+def format_sync_status(state: dict, prefix: str = "Состояние синхронизации.") -> str:
+    total = int(state.get("total", 0) or 0)
+    done = int(state.get("done", 0) or 0)
+    percent = min(100, int(done * 100 / total)) if total else 0
+    current = state.get("current_chat") or ("Подготовка списка чатов…" if state.get("running") else "Ожидание запуска")
+    status = "работает" if state.get("running") else "ожидает следующего прохода"
+    return (
+        f"{prefix}\n"
+        f"Состояние: {status}\n"
+        f"Сейчас: {current}\n"
+        f"Прогресс прохода: {percent}% ({done}/{total} чатов)\n"
+        f"Новых сообщений сохранено: {state.get('new_messages', 0)}\n"
+        f"Чатов с ещё не загруженной историей: {state.get('backlog', 0)}"
+    )
 
 
 @dp.message(Command("analyze"))
