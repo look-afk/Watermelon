@@ -19,7 +19,7 @@ from .storage import Storage
 _client = None
 
 # Read by the panel to show a small sync indicator.
-SYNC_STATE = {"running": False, "done": 0, "total": 0, "new_messages": 0, "backlog": 1, "cycles": 0}
+SYNC_STATE = {"running": False, "done": 0, "total": 0, "new_messages": 0, "backlog": 1, "cycles": 0, "current_chat": None}
 # Set by the panel after a rule change so the next sync cycle starts right away.
 SYNC_WAKE = asyncio.Event()
 
@@ -202,9 +202,10 @@ async def auto_sync_loop(client, storage: Storage):
                 if isinstance(entity, User) and not entity.bot and not entity.deleted and not entity.is_self:
                     await asyncio.to_thread(storage.upsert_people, [(entity.id, display_name(entity), entity.username)])
             targets = [d for d in dialogs if is_syncable(d)]
-            SYNC_STATE.update(running=True, done=0, total=len(targets), new_messages=0)
+            SYNC_STATE.update(running=True, done=0, total=len(targets), new_messages=0, current_chat="Подготовка…")
             failed = 0
             for dialog in targets:
+                SYNC_STATE["current_chat"] = dialog.name or "Без названия"
                 try:
                     saved, pending = await sync_dialog(client, storage, dialog, me)
                     SYNC_STATE["new_messages"] += saved
@@ -231,6 +232,7 @@ async def auto_sync_loop(client, storage: Storage):
         finally:
             SYNC_STATE["running"] = False
             SYNC_STATE["backlog"] = backlog
+            SYNC_STATE["current_chat"] = None
         # keep going quickly while some history is still being loaded, otherwise wait for the normal interval
         wait = 20 if backlog else max(1, settings.auto_sync_interval_min) * 60
         try:
