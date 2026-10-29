@@ -1,0 +1,176 @@
+"""/sync that checks what the bot already has, restores it if it was lost, continues the import and shows
+progress that comes from the DATABASE (so a restart never shows "0%" while the history is already loaded)."""
+import asyncio
+import time
+from datetime import datetime, timezone
+
+from aiogram.filters import Command
+from aiogram.types import Message
+
+from . import backup
+from .config import settings
+
+_WATCHERS: set[int] = set()
+_SYNCABLE = ("c.type IN ('private','group') AND c.chat_id NOT IN "
+             "(SELECT chat_id FROM chat_rules WHERE is_excluded=1)")
+
+
+def _n(con, sql: str) -> int:
+    return con.execute(sql).fetchone()[0] or 0
+
+
+def db_report(storage) -> dict:
+    """Everything that is persisted: this survives restarts (as long as the database does)."""
+    with storage._connect() as con:
+        return {
+            "messages": _n(con, "SELECT COUNT(*) FROM messages"),
+            "people": _n(con, "SELECT COUNT(DISTINCT user_id) FROM messages"),
+            "profiles": _n(con, "SELECT COUNT(*) FROM profiles WHERE data IS NOT NULL"),
+            "chats_total": _n(con, f"SELECT COUNT(*) FROM chats_meta c WHERE {_SYNCABLE}"),
+            "chats_done": _n(con, "SELECT COUNT(*) FROM sync_marks s JOIN chats_meta c ON c.chat_id=s.chat_id "
+                                  f"WHERE s.user_id=0 AND s.bf_done=1 AND {_SYNCABLE}"),
+            "chats_started": _n(con, "SELECT COUNT(*) FROM sync_marks s JOIN chats_meta c ON c.chat_id=s.chat_id "
+                                     f"WHERE s.user_id=0 AND s.bf_done=0 AND {_SYNCABLE}"),
+        }
+
+
+def db_health(storage) -> str:
+    try:
+        with storage._connect() as con:
+            return con.execute("PRAGMA quick_check(1)").fetchone()[0]
+    except Exception as exc:
+        return f"ошибка: {type(exc).__name__}"
+
+
+def _ago(dt) -> str:
+    if not dt:
+        return "нет"
+    s = (datetime.now(timezone.utc) - dt).total_seconds()
+    if s < 90:
+        return "только что"
+    if s < 3600:
+        return f"{int(s // 60)} мин назад"
+    if s < 86400:
+        return f"{s / 3600:.1f} ч назад"
+    return f"{int(s // 86400)} дн назад"
+
+
+async def latest_backup(client):
+    try:
+        found = await backup._find_backups(client)
+    except Exception:
+        return None
+    if not found:
+        return None
+    m = found[0]
+    return {"date": m.date, "mb": (m.file.size or 0) / 1048576, "count": len(found)}
+
+
+def render(rep: dict, state: dict, bk: dict | None, prefix: str, health: str | None = None) -> str:
+    total, done = rep["chats_total"], rep["chats_done"]
+    pct = min(100, int(done * 100 / total)) if total else 0
+    running = state.get("running")
+    lines = [prefix, ""]
+    if total:
+        lines.append(f"Загружено полностью: {done} из {total} чатов ({pct}%)")
+        if rep["chats_started"]:
+            lines.append(f"Загружается частично: {rep['chats_started']}")
+    else:
+        lines.append("Список чатов ещё загружается…")
+    lines.append(f"В базе: {rep['messages']:,} сообщений · {rep['people']:,} людей · {rep['profiles']} профилей".replace(",", " "))
+    if running:
+        lines.append(f"Сейчас: {state.get('current_chat') or '…'} (проход {state.get('done', 0)}/{state.get('total', 0)})")
+    else:
+        lines.append("Сейчас: ожидает следующего прохода")
+    if bk:
+        lines.append(f"Копия в «Избранном»: {_ago(bk['date'])}, {bk['mb']:.1f} МБ")
+    else:
+        lines.append("Копия в «Избранном»: пока нет (появится через пару минут)")
+    if health and health != "ok":
+        lines.append(f"⚠️ Проверка базы: {health}")
+    lines.append("")
+    lines.append("Если сервис перезапустится, прогресс не пропадёт: загрузка продолжится с того же места.")
+    return "\n".join(lines)
+
+
+async def run_sync_command(message: Message, storage, ensure_owner, get_client, sync_state, sync_wake):
+    if not await ensure_owner(message):
+        return
+    client = get_client()
+    if not client or not client.is_connected():
+        await message.answer("Личный аккаунт Telegram ещё подключается. Повтори через минуту.")
+        return
+    user_id = message.from_user.id
+    if user_id in _WATCHERS:
+        rep = await asyncio.to_thread(db_report, storage)
+        await message.answer(render(rep, dict(sync_state), await latest_backup(client), "Я уже слежу за синхронизацией."))
+        return
+
+    _WATCHERS.add(user_id)
+    status = await message.answer("Проверяю, что у меня уже есть…")
+    try:
+        rep = await asyncio.to_thread(db_report, storage)
+        notes = []
+        # 1) nothing in the database but a backup exists -> bring it back instead of starting from zero
+        if rep["messages"] == 0 and settings.backup_enabled:
+            if await backup.restore_if_fresh(client, settings.database_path):
+                rep = await asyncio.to_thread(db_report, storage)
+                notes.append(f"Восстановил данные из копии: {rep['messages']:,} сообщений.".replace(",", " "))
+        # 2) integrity check
+        health = await asyncio.to_thread(db_health, storage)
+        if health != "ok":
+            notes.append("База вернула предупреждение при проверке — сохраняю копию.")
+        # 3) save what we have right now, then continue the import
+        if rep["messages"] and settings.backup_enabled:
+            backup.request_backup()
+        before = sync_state.get("cycles", 0)
+        sync_wake.set()
+        bk = await latest_backup(client)
+        prefix = "Проверка готова, продолжаю синхронизацию." + ("\n" + "\n".join(notes) if notes else "")
+        last, deadline, bk_at = "", time.monotonic() + 30 * 60, time.monotonic()
+        while True:
+            rep = await asyncio.to_thread(db_report, storage)
+            state = dict(sync_state)
+            finished = state.get("cycles", 0) > before and not state.get("running") and state.get("backlog", 1) == 0
+            timed_out = time.monotonic() > deadline
+            if time.monotonic() - bk_at > 120:
+                bk, bk_at = await latest_backup(client), time.monotonic()
+            head = ("Синхронизация завершена: вся доступная история загружена." if finished else
+                    "Синхронизация продолжается в фоне. Я перестал следить, но она идёт — спроси /sync ещё раз." if timed_out
+                    else prefix)
+            text = render(rep, state, bk, head, health)
+            if text != last:
+                try:
+                    await status.edit_text(text)
+                    last = text
+                except Exception:
+                    pass
+            if finished or timed_out:
+                return
+            await asyncio.sleep(6)
+    except Exception as exc:
+        print(f"/sync: {type(exc).__name__}: {exc}")
+        try:
+            await status.edit_text(f"Во время проверки возникла ошибка ({type(exc).__name__}), но фоновая синхронизация продолжается.")
+        except Exception:
+            pass
+    finally:
+        _WATCHERS.discard(user_id)
+
+
+def install(dp):
+    """Replace the old /sync handler with the checking one (same signature, so aiogram keeps working)."""
+    from .main import ensure_owner, storage
+    from .userbot import SYNC_STATE, SYNC_WAKE, get_client
+
+    async def sync_command(message: Message):
+        await run_sync_command(message, storage, ensure_owner, get_client, SYNC_STATE, SYNC_WAKE)
+
+    for handler in dp.message.handlers:
+        if getattr(handler.callback, "__name__", "") == "sync_chats":
+            handler.callback = sync_command
+            print("Команда /sync: включена версия с проверкой данных и прогрессом из базы.")
+            return
+    print("Старый обработчик /sync не найден — регистрирую новый первым.")
+    dp.message.register(sync_command, Command("sync"))
+    dp.message.handlers.insert(0, dp.message.handlers.pop())
